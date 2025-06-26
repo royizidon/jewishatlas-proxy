@@ -1,0 +1,7 @@
+cat > requirements.txt << 'EOF'
+Flask
+requests
+python-dotenv
+Flask-Cors
+gunicorn
+EOF
