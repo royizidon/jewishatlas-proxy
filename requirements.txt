@@ -1,4 +1,3 @@
-cat > requirements.txt << 'EOF'
 Flask
 requests
 python-dotenv
