@@ -1,5 +1,4 @@
 # create and open in your editor
-cat > app.py << 'EOF'
 from flask import Flask, request, jsonify
 import os, requests
 from flask_cors import CORS
@@ -21,4 +20,4 @@ def proxy_landmarks():
 if __name__ == "__main__":
     # use PORT env var on Render, default to 5000 locally
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-EOF
+
