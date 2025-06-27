@@ -13,7 +13,7 @@ def proxy_landmarks():
     # Build full URL including querystring
     qs = urllib.parse.urlencode(request.args)
     full_url = f"{ARCGIS_URL}?{qs}"
-    app.logger.info(f"[DEBUG] Upstream URL: {full_url}")
+    print(f"[DEBUG] Upstream URL: {full_url}")
     
     upstream = requests.get(full_url)
     return Response(
