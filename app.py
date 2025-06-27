@@ -4,20 +4,21 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 
 load_dotenv()
-# load and clean the URL exactly once
 raw_url = os.getenv("ARCGIS_URL", "")
 ARCGIS_URL = raw_url.strip().replace("\n", "").replace("\r", "")
-print(f"[DEBUG] Cleaned ARCGIS_URL: {ARCGIS_URL}", flush=True)
-
 app = Flask(__name__)
 CORS(app)
 
-@app.route("/api/landmarks")
+@app.route("/api/landmarks", methods=["GET", "POST"])
 def proxy_landmarks():
-    # Let requests handle encoding
-    upstream = requests.get(ARCGIS_URL, params=request.args)
-    # Log the fully-encoded URL
-    print(f"[DEBUG] Upstream URL: {upstream.url}", flush=True)
+    if request.method == "GET":
+        upstream = requests.get(ARCGIS_URL, params=request.args)
+    else:
+        upstream = requests.post(
+            ARCGIS_URL,
+            data=request.get_data(),
+            headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+        )
 
     return Response(
         upstream.content,
