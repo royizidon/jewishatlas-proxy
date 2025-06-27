@@ -1,38 +1,65 @@
 from flask import Flask, request, Response
-import os, requests
+import os, random
+import requests
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# 1. Load & clean your layer URL (no /query at the end)
+# Load your layer root (no /query)
 load_dotenv()
 ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
+
+# Max number of points to return per view
+MAX_RECORDS = 1000
 
 app = Flask(__name__)
 CORS(app)
 
-# 2. Catch both the base path and ANY sub-path under /api/landmarks
-@app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET", "POST"])
-@app.route("/api/landmarks/<path:subpath>",                methods=["GET", "POST"])
+@app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET","POST"])
+@app.route("/api/landmarks/<path:subpath>",               methods=["GET","POST"])
 def proxy_landmarks(subpath):
-    """
-    - metadata requests (no 'where' + GET) → ARCGIS_URL?f=json
-    - feature queries (has 'where' or it's a POST) → ARCGIS_URL/query
-    """
-    is_query = request.method == "POST" or "where" in request.args
-
-    if is_query:
-        endpoint = f"{ARCGIS_URL}/query"
-        if request.method == "GET":
-            upstream = requests.get(endpoint, params=request.args)
-        else:
-            upstream = requests.post(
-                endpoint,
-                data=request.get_data(),
-                headers={"Content-Type": request.headers.get("Content-Type")}
-            )
+    # Gather params from GET or POST
+    if request.method == "GET":
+        params = request.args.to_dict(flat=True)
     else:
-        # layer metadata
-        upstream = requests.get(ARCGIS_URL, params=request.args)
+        # support JSON or form bodies
+        if request.is_json:
+            params = request.get_json()
+        else:
+            params = request.form.to_dict(flat=True)
+
+    # Detect a spatial (extent) query
+    is_spatial = "geometry" in params
+
+    if is_spatial:
+        # 1) Get only the IDs in the extent
+        id_params = params.copy()
+        id_params.pop("outFields", None)
+        id_params["returnIdsOnly"] = True
+        id_params["returnGeometry"] = False
+        id_params["f"] = "json"
+
+        id_url = f"{ARCGIS_URL}/query"
+        id_resp = requests.get(id_url, params=id_params)
+        if id_resp.status_code != 200:
+            # fallback: limit count instead of sampling
+            params.setdefault("resultRecordCount", MAX_RECORDS)
+            upstream = requests.get(id_url, params=params)
+        else:
+            ids = id_resp.json().get("objectIds", [])
+            # 2) Random sample up to MAX_RECORDS
+            if len(ids) > MAX_RECORDS:
+                ids = random.sample(ids, MAX_RECORDS)
+            # 3) Fetch those features
+            feat_params = {
+                "objectIds": ",".join(map(str, ids)),
+                "outFields": params.get("outFields", "*"),
+                "returnGeometry": True,
+                "f": "json"
+            }
+            upstream = requests.get(id_url, params=feat_params)
+    else:
+        # Non-spatial (metadata or search where=) – proxy directly
+        upstream = requests.get(ARCGIS_URL, params=params)
 
     return Response(
         upstream.content,
