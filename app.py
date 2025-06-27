@@ -1,5 +1,4 @@
-# create and open in your editor
-from flask import Flask, request, jsonify
+from flask import Flask, request, Response
 import os, requests
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -7,17 +6,24 @@ from dotenv import load_dotenv
 load_dotenv()    # load ARCGIS_URL from .env
 
 app = Flask(__name__)
-CORS(app)        # allow requests from your front-end
+CORS(app)
 
 ARCGIS_URL = os.getenv("ARCGIS_URL")
 
 @app.route("/api/landmarks")
 def proxy_landmarks():
-    # forward every query param to the real ArcGIS URL
-    r = requests.get(ARCGIS_URL, params=request.args)
-    return jsonify(r.json()), r.status_code
+    # forward all query params to the real service
+    upstream = requests.get(ARCGIS_URL, params=request.args, stream=True)
+    
+    # grab upstream content type (likely application/json)
+    content_type = upstream.headers.get("Content-Type", "application/json")
+    
+    # return a Flask Response with the raw body, code, and content-type
+    return Response(
+        upstream.raw.read(), 
+        status=upstream.status_code, 
+        content_type=content_type
+    )
 
 if __name__ == "__main__":
-    # use PORT env var on Render, default to 5000 locally
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-
