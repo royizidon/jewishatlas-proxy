@@ -1,86 +1,83 @@
 from flask import Flask, request, Response
-import os, requests, random, time
+import os, requests, random, json
 from flask_cors import CORS
 from dotenv import load_dotenv
 
+# load ARCGIS_URL from .env or hard-code it
 load_dotenv()
 ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
 
 app = Flask(__name__)
 CORS(app)
 
-# ————————————————
-# CACHE CONFIGURATION
-# ————————————————
-COUNT_TTL       = 86400 * 2   # refresh every 2 days
-_cached_count   = None
-_last_count_ts  = 0
-
-def get_total_count(where="1=1"):
-    global _cached_count, _last_count_ts
-    now = time.time()
-    if _cached_count is None or (now - _last_count_ts) > COUNT_TTL:
-        resp = requests.get(
-            f"{ARCGIS_URL}/query",
-            params={"where": where, "returnCountOnly": "true", "f": "json"}
-        )
-        resp.raise_for_status()
-        _cached_count  = resp.json().get("count", 0)
-        _last_count_ts = now
-        print(f"[CACHE] refreshed count = {_cached_count}")
-    return _cached_count
-
-# health check
-@app.route("/")
-def home():
-    return "✅ proxy is up!"
-
-# log every request
-@app.before_request
-def log_request():
-    print(f"\n→ {request.method} {request.path} args={request.args.to_dict(flat=True)}")
-
-# ————————————————
-# PROXY ENDPOINT
-# ————————————————
 @app.route("/api/landmarks", methods=["GET", "POST"])
 def proxy_landmarks():
-    args        = request.args.to_dict(flat=True)
-    where       = args.get("where", "1=1")
-    out_fields  = args.get("outFields", "*")
-    sample_size = int(args.get("sample", 3000))
+    # detect if this is a feature‐query (has where or POST)
+    is_query = request.method == "POST" or "where" in request.args
+    if not is_query:
+        # metadata passthrough
+        upstream = requests.get(ARCGIS_URL, params=request.args)
+        return Response(
+            upstream.content,
+            status=upstream.status_code,
+            content_type=upstream.headers.get("Content-Type", "application/json")
+        )
 
-    # 1) grab the (cached) total count
-    total = get_total_count(where)
-    print(f"  total count = {total}, requested sample_size = {sample_size}")
+    # build base params
+    params      = request.args.to_dict(flat=True)
+    where       = params.get("where", "1=1")
+    out_fields  = params.get("outFields", "*")
 
-    # 2) clamp to available features
-    n = min(sample_size, total)
-    if n == 0:
-        print("  nothing to sample → returning empty array")
-        return Response('{"features": []}', 200, mimetype="application/json")
+    # paging + per‐page sample settings
+    page_size        = 2000
+    sample_per_batch = int(params.get("batchSample", 300))
 
-    # 3) pick a random start so you get a window of n features
-    max_offset = max(total - n, 0)
-    offset     = random.randint(0, max_offset)
-    print(f"  offset = {offset}, batch size = {n}")
+    sampled = []       # will hold the union of all per‐page samples
+    offset  = 0
 
-    # 4) do the single “window” query
-    params = {
-        "where":              where,
-        "outFields":          out_fields,
-        "resultRecordCount":  n,
-        "resultOffset":       offset,
-        "f":                  "json"
+    while True:
+        # page through
+        resp = requests.get(
+            f"{ARCGIS_URL}/query",
+            params={
+                "where":              where,
+                "outFields":          out_fields,
+                "resultRecordCount":  page_size,
+                "resultOffset":       offset,
+                "f":                  "json"
+            }
+        )
+        data  = resp.json()
+        batch = data.get("features", [])
+        if not batch:
+            break
+
+        # sample up to sample_per_batch from this page
+        k = min(sample_per_batch, len(batch))
+        sampled.extend(random.sample(batch, k))
+
+        # if fewer than a full page, we’re done
+        if len(batch) < page_size:
+            break
+
+        offset += len(batch)
+
+    # build a minimal GeoJSON‐style response
+    payload = {
+        "objectIdFieldName": data.get("objectIdFieldName", ""),
+        "geometryType":      data.get("geometryType", ""),
+        "spatialReference":  data.get("spatialReference", {}),
+        "fields":            data.get("fields", []),
+        "features":          sampled
     }
-    resp = requests.get(f"{ARCGIS_URL}/query", params=params)
 
-    # 5) return ArcGIS’s JSON straight through
     return Response(
-        resp.content,
-        status=resp.status_code,
-        content_type=resp.headers.get("Content-Type", "application/json")
+        json.dumps(payload),
+        status=200,
+        content_type="application/json"
     )
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    import os
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
