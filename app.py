@@ -1,5 +1,5 @@
-from flask import Flask, request, Response
-import os, requests
+from flask import Flask, request, Response, jsonify
+import os, requests, random, json
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -20,6 +20,7 @@ def proxy_landmarks(subpath):
     """
     is_query = request.method == "POST" or "where" in request.args
 
+    # forward to the correct endpoint
     if is_query:
         endpoint = f"{ARCGIS_URL}/query"
         if request.method == "GET":
@@ -31,13 +32,22 @@ def proxy_landmarks(subpath):
                 headers={"Content-Type": request.headers.get("Content-Type")}
             )
     else:
-        # layer metadata
         upstream = requests.get(ARCGIS_URL, params=request.args)
 
+    # try to parse JSON and sample features
+    content_type = upstream.headers.get("Content-Type", "")
+    if "application/json" in content_type:
+        data = upstream.json()
+        if isinstance(data.get("features"), list) and len(data["features"]) > 3000:
+            data["features"] = random.sample(data["features"], 3000)
+        body = json.dumps(data)
+    else:
+        body = upstream.content
+
     return Response(
-        upstream.content,
+        body,
         status=upstream.status_code,
-        content_type=upstream.headers.get("Content-Type", "application/json")
+        content_type=content_type
     )
 
 if __name__ == "__main__":
