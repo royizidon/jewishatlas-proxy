@@ -1,78 +1,85 @@
-from flask import Flask, request, Response
-import os, requests
-from flask_cors import CORS
-from dotenv import load_dotenv
+import os
 import json
 import random
+import requests
+from flask import Flask, request, Response, jsonify
+from flask_cors import CORS
+from dotenv import load_dotenv
 
-# 1. Load & clean your layer URL (no /query at the end)
+# ──────────────── setup ──────────────────
 load_dotenv()
-ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
+ARCGIS_URL = os.getenv("ARCGIS_URL", "").rstrip("/")
+if not ARCGIS_URL:
+    raise RuntimeError("Please set ARCGIS_URL in your .env")
 
 app = Flask(__name__)
 CORS(app)
 
-# 2. Catch both the base path and ANY sub-path under /api/landmarks
-@app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET", "POST"])
-@app.route("/api/landmarks/<path:subpath>", methods=["GET", "POST"])
-def proxy_landmarks(subpath):
+
+# ──────────────── main proxy ──────────────────
+@app.route("/api/landmarks", methods=["GET", "POST"])
+def proxy_landmarks():
     """
-    - metadata requests (no 'where'+GET) → ARCGIS_URL?f=json
-    - feature queries (has 'where' or it's a POST) → ARCGIS_URL/query
-      → then sample up to 3000 features
+    Proxies every request to ARCGIS_URL/query, then:
+      • If it’s valid GeoJSON with >3000 features → random.sample to 3000
+      • Else → passthrough unmodified
     """
-    is_query = request.method == "POST" or "where" in request.args
+    endpoint = f"{ARCGIS_URL}/query"
 
-    if is_query:
-        endpoint = f"{ARCGIS_URL}/query"
-        # forward the request
-        if request.method == "GET":
-            upstream = requests.get(endpoint, params=request.args, timeout=30)
-        else:
-            upstream = requests.post(
-                endpoint,
-                data=request.get_data(),
-                headers={"Content-Type": request.headers.get("Content-Type")},
-                timeout=30
-            )
-
-        # only sample GeoJSON feature responses
-        content_type = upstream.headers.get("Content-Type", "")
-        if upstream.status_code == 200 and "application/json" in content_type:
-            text = upstream.content.decode("utf-8")
-            try:
-                data = json.loads(text)
-                features = data.get("features")
-                if isinstance(features, list) and len(features) > 3000:
-                    # randomly pick 3000 features
-                    data["features"] = random.sample(features, 3000)
-                # return modified GeoJSON
-                return Response(
-                    json.dumps(data),
-                    status=200,
-                    content_type="application/json"
-                )
-            except (ValueError, KeyError):
-                # if parsing fails, just fall back to the raw response
-                pass
-
-        # non-GeoJSON or error → passthrough
-        return Response(
-            upstream.content,
-            status=upstream.status_code,
-            content_type=content_type
+    # 1) Forward the request
+    if request.method == "GET":
+        # ensure we get geojson
+        params = request.args.to_dict()
+        params["f"] = "geojson"
+        upstream = requests.get(endpoint, params=params, timeout=30)
+    else:
+        upstream = requests.post(
+            endpoint,
+            data=request.get_data(),
+            headers={"Content-Type": request.headers.get("Content-Type")},
+            timeout=30
         )
 
-    else:
-        # metadata request → just proxy to the layer URL
-        upstream = requests.get(ARCGIS_URL, params=request.args, timeout=30)
+    # 2) If ArcGIS failed, just bubble up the error
+    if upstream.status_code != 200:
         return Response(
             upstream.content,
             status=upstream.status_code,
             content_type=upstream.headers.get("Content-Type", "application/json")
         )
 
+    # 3) If it’s JSON, try sampling
+    content_type = upstream.headers.get("Content-Type", "")
+    if "application/json" in content_type:
+        try:
+            data = upstream.json()
+            feats = data.get("features")
+            if isinstance(feats, list) and len(feats) > 3000:
+                data["features"] = random.sample(feats, 3000)
+            return Response(
+                json.dumps(data),
+                status=200,
+                content_type="application/json"
+            )
+        except Exception:
+            # parsing error? fall through to raw passthrough
+            pass
 
+    # 4) Non-JSON or parse error: passthrough
+    return Response(
+        upstream.content,
+        status=200,
+        content_type=content_type
+    )
+
+
+# ──────────────── health check ──────────────────
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify(status="healthy", arcgis=ARCGIS_URL), 200
+
+
+# ──────────────── run ──────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=True)
