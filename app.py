@@ -27,18 +27,20 @@ def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, 
             seed = hash(seed_str) % (2**32)
             random.seed(seed)
         
-        # Adjust max features based on zoom level
+        # Adjust max features based on zoom level - MORE GENEROUS
         if zoom_level >= 15:  # Street level - more detail
             adjusted_max = min(max_features * 2, 2000)
         elif zoom_level >= 12:  # Neighborhood level
             adjusted_max = max_features
-        elif zoom_level >= 8:   # City level
-            adjusted_max = max_features // 2
-        else:  # Region level - fewer points
-            adjusted_max = max_features // 4
+        elif zoom_level >= 9:   # City level
+            adjusted_max = max_features  # INCREASED from max_features // 2
+        elif zoom_level >= 6:   # Country level  
+            adjusted_max = max_features // 2  # INCREASED from max_features // 4
+        else:  # World level
+            adjusted_max = max_features // 3  # INCREASED from max_features // 4
         
         # Smart sampling based on zoom and importance
-        if zoom_level >= 12:
+        if zoom_level >= 10:
             # At neighborhood/street level: prioritize important features + random sample
             important_features = []
             regular_features = []
@@ -62,9 +64,80 @@ def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, 
                 random_regular = random.sample(regular_features, min(remaining_slots, len(regular_features)))
                 sampled_features.extend(random_regular)
                 
+        elif zoom_level >= 6:
+            # At region/country level: geographic distribution + importance
+            # Group features by rough geographic regions
+            regions = {}
+            for feature in features:
+                # Get coordinates for geographic grouping
+                geom = feature.get('geometry', {})
+                if geom.get('type') == 'Point':
+                    coords = geom.get('coordinates', [0, 0])
+                    lon, lat = coords[0], coords[1]
+                    
+                    # Simple geographic regions based on coordinates
+                    if -10 <= lon <= 50 and 30 <= lat <= 70:
+                        region = 'Europe'
+                    elif 50 <= lon <= 150 and 10 <= lat <= 70:
+                        region = 'Asia'
+                    elif -180 <= lon <= -30:
+                        region = 'Americas'
+                    elif 10 <= lon <= 55 and -35 <= lat <= 30:
+                        region = 'Africa'
+                    elif 110 <= lon <= 180 and -50 <= lat <= 10:
+                        region = 'Oceania'
+                    else:
+                        region = 'Other'
+                    
+                    if region not in regions:
+                        regions[region] = []
+                    regions[region].append(feature)
+            
+            # Sample from each region proportionally
+            sampled_features = []
+            total_regions = len(regions)
+            
+            for region, region_features in regions.items():
+                # Sort region features by priority
+                def get_priority(feature):
+                    props = feature.get('properties', {})
+                    category = props.get('main_category', '')
+                    importance = props.get('importance', 0)
+                    
+                    if category == 'Featured':
+                        return 1000 + importance
+                    elif category == 'Synagogue':
+                        return 800 + importance
+                    elif category == 'Heritage':
+                        return 600 + importance
+                    else:
+                        return importance
+                
+                sorted_region_features = sorted(region_features, key=get_priority, reverse=True)
+                
+                # Allocate features per region (minimum 10% of total, rest proportional)
+                region_quota = max(adjusted_max // 10, 
+                                 int(adjusted_max * len(region_features) / len(features)))
+                region_quota = min(region_quota, len(sorted_region_features))
+                
+                sampled_features.extend(sorted_region_features[:region_quota])
+            
+            # If we still have room, add more from largest regions
+            remaining_slots = adjusted_max - len(sampled_features)
+            if remaining_slots > 0:
+                all_remaining = []
+                for region_features in regions.values():
+                    all_remaining.extend(region_features)
+                
+                # Remove already selected features
+                remaining_features = [f for f in all_remaining if f not in sampled_features]
+                if remaining_features:
+                    additional = random.sample(remaining_features, 
+                                             min(remaining_slots, len(remaining_features)))
+                    sampled_features.extend(additional)
+                
         else:
-            # At city/region level: only show most important features
-            # Sort by importance and category priority
+            # At world level: only show most important features, geographically distributed
             def get_priority(feature):
                 props = feature.get('properties', {})
                 category = props.get('main_category', '')
