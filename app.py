@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 # load ARCGIS_URL from .env or hard-code it
 load_dotenv()
 ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
+# ARCGIS_URL = "https://services-eu1.arcgis.com/FckSU1kja7wbnBnq/arcgis/rest/services/Landmarks/FeatureServer/0"
 
 app = Flask(__name__)
 CORS(app)
