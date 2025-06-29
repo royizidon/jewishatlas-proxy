@@ -4,29 +4,42 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import json
 import random
+import math
+from collections import defaultdict
 
-# 1. Load & clean your layer URL (no /query at the end)
+# Load environment and setup Flask
 load_dotenv()
 ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
 app = Flask(__name__)
 CORS(app)
 
-import math
-from collections import defaultdict
-
 def create_clusters(features, zoom_level, cluster_distance=50):
     """Create clusters from features based on geographic proximity"""
+    
+    # Debug logging
+    print(f"DEBUG: create_clusters called with zoom={zoom_level}, features={len(features)}")
+    
+    # At zoom 12+, return individual points with is_cluster=False
     if zoom_level >= 12:
-        # At high zoom, return individual points
+        print("DEBUG: High zoom - returning individual points")
+        for feature in features:
+            if 'properties' not in feature:
+                feature['properties'] = {}
+            feature['properties']['is_cluster'] = False
+            feature['properties']['cluster_count'] = 1
         return features
     
-    # Group features into clusters based on geographic proximity
+    # At lower zoom levels, create clusters
+    print("DEBUG: Low zoom - creating clusters")
     clusters = []
     unclustered = features[:]
     
-    # Calculate cluster distance based on zoom (smaller distance = more clusters at higher zoom)
-    # At zoom 3: ~200km apart, at zoom 11: ~5km apart
-    cluster_radius_degrees = cluster_distance / (111000 * (2 ** (zoom_level - 3)))
+    # Calculate cluster distance based on zoom level
+    # More aggressive clustering at lower zoom levels
+    cluster_radius_degrees = cluster_distance / (111000 * (2 ** (zoom_level - 1)))
+    print(f"DEBUG: Cluster radius: {cluster_radius_degrees} degrees")
+    
+    cluster_id = 0
     
     while unclustered:
         # Start a new cluster with the first unclustered point
@@ -37,7 +50,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
             continue
             
         cluster_features = [seed_feature]
-        cluster_center_lon = seed_coords[0]
+        cluster_center_lon = seed_coords[0] 
         cluster_center_lat = seed_coords[1]
         
         # Find all features within cluster radius
@@ -45,6 +58,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
         for feature in unclustered:
             coords = feature.get('geometry', {}).get('coordinates', [0, 0])
             if len(coords) >= 2:
+                # Calculate simple distance
                 distance = math.sqrt(
                     (coords[0] - cluster_center_lon) ** 2 + 
                     (coords[1] - cluster_center_lat) ** 2
@@ -52,7 +66,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
                 
                 if distance <= cluster_radius_degrees:
                     cluster_features.append(feature)
-                    # Update cluster center (simple average)
+                    # Update cluster center (average of all points)
                     cluster_center_lon = sum(f.get('geometry', {}).get('coordinates', [0, 0])[0] 
                                            for f in cluster_features) / len(cluster_features)
                     cluster_center_lat = sum(f.get('geometry', {}).get('coordinates', [0, 0])[1] 
@@ -65,28 +79,27 @@ def create_clusters(features, zoom_level, cluster_distance=50):
         unclustered = remaining
         
         if len(cluster_features) == 1:
-            # Single point - return as individual feature (but limit details for security)
+            # Single point - mark as individual feature
             feature = cluster_features[0]
-            feature['properties'] = {
-                'id': feature.get('properties', {}).get('OBJECTID', 0),
-                'main_category': feature.get('properties', {}).get('main_category', 'Unknown'),
-                'cluster_count': 1,
-                'is_cluster': False
-            }
+            if 'properties' not in feature:
+                feature['properties'] = {}
+            feature['properties']['is_cluster'] = False
+            feature['properties']['cluster_count'] = 1
             clusters.append(feature)
         else:
             # Create cluster feature
-            # Count categories in cluster
             categories = defaultdict(int)
             total_count = len(cluster_features)
             
+            # Count categories in cluster
             for feature in cluster_features:
                 category = feature.get('properties', {}).get('main_category', 'Unknown')
                 categories[category] += 1
             
             # Find dominant category
-            dominant_category = max(categories.items(), key=lambda x: x[1])[0]
+            dominant_category = max(categories.items(), key=lambda x: x[1])[0] if categories else 'Unknown'
             
+            # Create cluster feature
             cluster_feature = {
                 'type': 'Feature',
                 'geometry': {
@@ -94,21 +107,24 @@ def create_clusters(features, zoom_level, cluster_distance=50):
                     'coordinates': [cluster_center_lon, cluster_center_lat]
                 },
                 'properties': {
-                    'id': f"cluster_{len(clusters)}",
+                    'OBJECTID': f"cluster_{cluster_id}",
                     'main_category': dominant_category,
                     'cluster_count': total_count,
-                    'is_cluster': True,
+                    'is_cluster': True, 
                     'categories': dict(categories),
                     'Name': f"Cluster of {total_count} Jewish Sites",
+                    'eng_name': f"Cluster ({total_count})",
                     'Address': f"{total_count} sites in this area"
                 }
             }
             clusters.append(cluster_feature)
+            cluster_id += 1
     
+    print(f"DEBUG: Created {len([c for c in clusters if c.get('properties', {}).get('is_cluster')])} clusters and {len([c for c in clusters if not c.get('properties', {}).get('is_cluster')])} individual points")
     return clusters
 
-def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, max_features=1000):
-    """Smart sampling with server-side clustering for security"""
+def process_features(response_data, zoom_level=10, viewport_bounds=None):
+    """Process features with clustering based on zoom level"""
     try:
         data = json.loads(response_data)
         
@@ -116,234 +132,172 @@ def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, 
             return response_data
         
         features = data['features']
+        original_count = len(features)
         
-        # Create consistent seed from viewport bounds for same area = same points
+        print(f"DEBUG: Processing {original_count} features at zoom {zoom_level}")
+        
+        # Create consistent seed for viewport if provided
         if viewport_bounds:
-            seed_str = f"{viewport_bounds['west']:.3f},{viewport_bounds['south']:.3f},{viewport_bounds['east']:.3f},{viewport_bounds['north']:.3f}"
+            seed_str = f"{viewport_bounds.get('west', 0):.3f},{viewport_bounds.get('south', 0):.3f},{viewport_bounds.get('east', 0):.3f},{viewport_bounds.get('north', 0):.3f}"
             seed = hash(seed_str) % (2**32)
             random.seed(seed)
         
-        # Smart zoom-based strategy with clustering
-        if zoom_level >= 12:
-            # High zoom: Individual points with sampling
-            adjusted_max = 1500  # Reasonable number of individual points
+        # Sample features if too many (to prevent overload)
+        max_features_for_processing = 3000
+        if len(features) > max_features_for_processing:
+            # Prioritize Featured sites
+            featured = [f for f in features if f.get('properties', {}).get('main_category') == 'Featured']
+            others = [f for f in features if f.get('properties', {}).get('main_category') != 'Featured']
             
-            # Prioritize Featured, then sample others
-            featured_features = []
-            other_features = []
-            
-            for feature in features:
-                category = feature.get('properties', {}).get('main_category', '')
-                if category == 'Featured':
-                    featured_features.append(feature)
+            remaining_slots = max_features_for_processing - len(featured)
+            if remaining_slots > 0 and others:
+                if len(others) <= remaining_slots:
+                    sampled_others = others
                 else:
-                    other_features.append(feature)
-            
-            sampled_features = featured_features[:]
-            remaining_slots = adjusted_max - len(sampled_features)
-            
-            if remaining_slots > 0 and other_features:
-                if len(other_features) <= remaining_slots:
-                    sampled_features.extend(other_features)
-                else:
-                    random_others = random.sample(other_features, remaining_slots)
-                    sampled_features.extend(random_others)
+                    sampled_others = random.sample(others, remaining_slots)
+                features = featured + sampled_others
+            else:
+                features = featured
         
-        else:
-            # Low zoom: Use clustering for security
-            # First sample a larger set for clustering
-            sample_size = min(3000, len(features))  # Get enough points for good clustering
-            
-            # Prioritize Featured sites in the sample
-            featured_features = [f for f in features if f.get('properties', {}).get('main_category') == 'Featured']
-            other_features = [f for f in features if f.get('properties', {}).get('main_category') != 'Featured']
-            
-            # Always include all Featured sites
-            sample_features = featured_features[:]
-            remaining_slots = sample_size - len(sample_features)
-            
-            if remaining_slots > 0 and other_features:
-                if len(other_features) <= remaining_slots:
-                    sample_features.extend(other_features)
-                else:
-                    random_others = random.sample(other_features, remaining_slots)
-                    sample_features.extend(random_others)
-            
-            # Create clusters from the sampled features
-            sampled_features = create_clusters(sample_features, zoom_level)
+        # Apply clustering logic
+        processed_features = create_clusters(features, zoom_level)
         
-        # Update data with processed features
-        data['features'] = sampled_features
+        # Update the response
+        data['features'] = processed_features
         
-        # Add metadata about processing
+        # Add metadata
         if 'metadata' not in data:
             data['metadata'] = {}
+        
+        cluster_count = len([f for f in processed_features if f.get('properties', {}).get('is_cluster', False)])
+        point_count = len([f for f in processed_features if not f.get('properties', {}).get('is_cluster', False)])
+        
         data['metadata'].update({
             'processed': True,
-            'original_count': len(features),
-            'returned_count': len(sampled_features),
+            'original_count': original_count,
+            'returned_count': len(processed_features),
+            'cluster_count': cluster_count,
+            'point_count': point_count, 
             'zoom_level': zoom_level,
-            'display_mode': 'clusters' if zoom_level < 12 else 'points',
-            'cluster_count': len([f for f in sampled_features if f.get('properties', {}).get('is_cluster', False)]) if zoom_level < 12 else 0
+            'display_mode': 'clusters' if zoom_level < 12 else 'points'
         })
         
+        print(f"DEBUG: Returning {cluster_count} clusters and {point_count} points")
         return json.dumps(data)
         
     except Exception as e:
-        # If anything goes wrong, return original data
-        print(f"Processing error: {e}")
+        print(f"ERROR: Processing failed: {e}")
         return response_data
 
-# 2. Catch both the base path and ANY sub-path under /api/landmarks
+# Main proxy endpoint
 @app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET", "POST"])
-@app.route("/api/landmarks/<path:subpath>",                methods=["GET", "POST"])
+@app.route("/api/landmarks/<path:subpath>", methods=["GET", "POST"])
 def proxy_landmarks(subpath):
-    """
-    - metadata requests (no 'where' + GET) → ARCGIS_URL?f=json
-    - feature queries (has 'where' or it's a POST) → ARCGIS_URL/query
-    """
+    """Proxy requests to ArcGIS with smart clustering"""
+    
+    # Determine if this is a feature query
     is_query = request.method == "POST" or "where" in request.args
     
     if is_query:
         endpoint = f"{ARCGIS_URL}/query"
         
-        # Modify parameters to add spatial filter if viewport bounds provided
         if request.method == "GET":
             params = dict(request.args)
+            zoom_level = int(params.get('zoom', 10))
             
-            # Add spatial filter if viewport bounds are provided
+            print(f"DEBUG: Query with zoom={zoom_level}, params={list(params.keys())}")
+            
+            # Handle spatial filtering
             if all(param in params for param in ['xmin', 'ymin', 'xmax', 'ymax']):
-                # Create envelope geometry for spatial filter
-                envelope = f"{params['xmin']},{params['ymin']},{params['xmax']},{params['ymax']}"
+                # Extract bounds
+                xmin = float(params['xmin'])
+                ymin = float(params['ymin'])
+                xmax = float(params['xmax'])
+                ymax = float(params['ymax'])
+                
+                # Create envelope geometry
+                envelope = f"{xmin},{ymin},{xmax},{ymax}"
                 params['geometry'] = envelope
                 params['geometryType'] = 'esriGeometryEnvelope'
                 params['spatialRel'] = 'esriSpatialRelIntersects'
-                params['inSR'] = '3857'  # Changed from 4326 to 3857 (Web Mercator)
+                params['inSR'] = '4326'  # Input spatial reference
+                params['outSR'] = '4326'  # Output spatial reference
                 
-                # Remove the individual bound parameters since we've used them
+                # Store viewport bounds for processing
+                viewport_bounds = {
+                    'west': xmin, 'south': ymin, 
+                    'east': xmax, 'north': ymax
+                }
+                
+                # Remove individual bound parameters
                 for bound_param in ['xmin', 'ymin', 'xmax', 'ymax']:
                     params.pop(bound_param, None)
+            else:
+                viewport_bounds = None
             
-            # Ensure we're getting GeoJSON format
-            if 'f' not in params:
-                params['f'] = 'geojson'
-            
-            # Increase the result count limit to get more features before sampling
+            # Ensure we get enough features for clustering
             if 'resultRecordCount' not in params:
-                params['resultRecordCount'] = '5000'  # Get more, then sample
+                params['resultRecordCount'] = '5000'
             
-            upstream = requests.get(endpoint, params=params)
+            # Ensure GeoJSON format
+            params['f'] = 'geojson'
+            
+            # Make the request
+            upstream = requests.get(endpoint, params=params, timeout=30)
+            
         else:
+            # POST request
             upstream = requests.post(
                 endpoint,
                 data=request.get_data(),
-                headers={"Content-Type": request.headers.get("Content-Type")}
+                headers={"Content-Type": request.headers.get("Content-Type")},
+                timeout=30
             )
-    else:
-        # layer metadata
-        upstream = requests.get(ARCGIS_URL, params=request.args)
+            zoom_level = 10  # Default for POST
+            viewport_bounds = None
     
-    # If this is a feature query response, apply smart sampling
-    if is_query and upstream.status_code == 200:
-        # Check if we should apply sampling (only for viewport queries)
-        should_sample = False
-        viewport_bounds = None
-        zoom_level = 10  # default zoom
-        
-        if request.method == "GET":
-            # Sample if spatial bounds were provided
-            should_sample = any(param in request.args for param in ['xmin', 'ymin', 'xmax', 'ymax'])
-            
-            if should_sample:
-                # Extract viewport bounds and zoom level
-                viewport_bounds = {
-                    'west': float(request.args.get('xmin', 0)),
-                    'south': float(request.args.get('ymin', 0)),
-                    'east': float(request.args.get('xmax', 0)),
-                    'north': float(request.args.get('ymax', 0))
-                }
-                zoom_level = int(request.args.get('zoom', 10))
-                
-                # Add more debug info
-                print(f"DEBUG: Viewport bounds: {viewport_bounds}")
-                print(f"DEBUG: Zoom level: {zoom_level}")
-                print(f"DEBUG: Should sample: {should_sample}")
-        
-        if should_sample:
-            # Apply smart sampling based on zoom and viewport
-            modified_content = limit_features_randomly(
-                upstream.content.decode('utf-8'), 
-                viewport_bounds=viewport_bounds,
+    else:
+        # Metadata request
+        upstream = requests.get(ARCGIS_URL, params=request.args, timeout=30)
+        return Response(
+            upstream.content,
+            status=upstream.status_code,
+            content_type=upstream.headers.get("Content-Type", "application/json")
+        )
+    
+    # Process the response if it's a successful feature query
+    if upstream.status_code == 200 and is_query:
+        try:
+            # Process features with clustering
+            processed_content = process_features(
+                upstream.content.decode('utf-8'),
                 zoom_level=zoom_level,
-                max_features=1000
+                viewport_bounds=viewport_bounds
             )
+            
             return Response(
-                modified_content,
-                status=upstream.status_code,
+                processed_content,
+                status=200,
                 content_type="application/json"
             )
+            
+        except Exception as e:
+            print(f"ERROR: Failed to process response: {e}")
+            # Return original response on error
+            return Response(
+                upstream.content,
+                status=upstream.status_code,
+                content_type=upstream.headers.get("Content-Type", "application/json")
+            )
     
-    # Return original response for metadata or non-sampled queries
+    # Return original response for non-successful or non-query requests
     return Response(
         upstream.content,
         status=upstream.status_code,
         content_type=upstream.headers.get("Content-Type", "application/json")
     )
 
-# 3. Add a new endpoint for viewport-based queries
-@app.route("/api/landmarks/viewport", methods=["POST"])
-def get_viewport_landmarks():
-    """Get landmarks for specific viewport with automatic random sampling"""
-    try:
-        data = request.get_json()
-        bounds = data.get('bounds', {})
-        
-        if not all(k in bounds for k in ['west', 'south', 'east', 'north']):
-            return jsonify({"error": "Missing viewport bounds"}), 400
-        
-        # Create spatial query parameters
-        envelope = f"{bounds['west']},{bounds['south']},{bounds['east']},{bounds['north']}"
-        
-        params = {
-            'where': '1=1',  # Get all features in area
-            'geometry': envelope,
-            'geometryType': 'esriGeometryEnvelope',
-            'spatialRel': 'esriSpatialRelIntersects',
-            'inSR': '4326',
-            'outSR': '4326',
-            'f': 'geojson',
-            'outFields': '*',
-            'resultRecordCount': '5000'  # Get more features before sampling
-        }
-        
-        # Add category filter if provided
-        if 'category' in data and data['category']:
-            params['where'] = f"main_category = '{data['category']}'"
-        
-        # Query ArcGIS
-        response = requests.get(f"{ARCGIS_URL}/query", params=params)
-        
-        if response.status_code == 200:
-            # Get zoom level from request
-            zoom_level = data.get('zoom', 12)
-            
-            # Create viewport bounds for consistent sampling
-            viewport_bounds = bounds
-            
-            # Apply smart sampling
-            sampled_content = limit_features_randomly(
-                response.content.decode('utf-8'), 
-                viewport_bounds=viewport_bounds,
-                zoom_level=zoom_level,
-                max_features=1000
-            )
-            return Response(sampled_content, content_type="application/json")
-        else:
-            return jsonify({"error": "ArcGIS query failed"}), response.status_code
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    print(f"Starting server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=True)
