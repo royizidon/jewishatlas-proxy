@@ -108,6 +108,7 @@ def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, 
 @app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET", "POST"])
 @app.route("/api/landmarks/<path:subpath>",                methods=["GET", "POST"])
 def proxy_landmarks(subpath):
+    print(f"DEBUG: Received params: {dict(request.args)}")
     """
     - metadata requests (no 'where' + GET) → ARCGIS_URL?f=json
     - feature queries (has 'where' or it's a POST) → ARCGIS_URL/query
