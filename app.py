@@ -27,14 +27,24 @@ def get_total_count(where="1=1"):
         resp.raise_for_status()
         _cached_count  = resp.json().get("count", 0)
         _last_count_ts = now
+        print(f"[CACHE] refreshed count = {_cached_count}")
     return _cached_count
+
+# health check
+@app.route("/")
+def home():
+    return "✅ proxy is up!"
+
+# log every request
+@app.before_request
+def log_request():
+    print(f"\n→ {request.method} {request.path} args={request.args.to_dict(flat=True)}")
 
 # ————————————————
 # PROXY ENDPOINT
 # ————————————————
 @app.route("/api/landmarks", methods=["GET", "POST"])
 def proxy_landmarks():
-    # always treat as a feature query
     args        = request.args.to_dict(flat=True)
     where       = args.get("where", "1=1")
     out_fields  = args.get("outFields", "*")
@@ -42,15 +52,18 @@ def proxy_landmarks():
 
     # 1) grab the (cached) total count
     total = get_total_count(where)
+    print(f"  total count = {total}, requested sample_size = {sample_size}")
 
     # 2) clamp to available features
     n = min(sample_size, total)
     if n == 0:
+        print("  nothing to sample → returning empty array")
         return Response('{"features": []}', 200, mimetype="application/json")
 
     # 3) pick a random start so you get a window of n features
-    max_offset = total - n
+    max_offset = max(total - n, 0)
     offset     = random.randint(0, max_offset)
+    print(f"  offset = {offset}, batch size = {n}")
 
     # 4) do the single “window” query
     params = {
@@ -70,5 +83,4 @@ def proxy_landmarks():
     )
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
