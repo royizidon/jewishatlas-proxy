@@ -1,46 +1,61 @@
-import os
-import json
-import random
-import requests
 from flask import Flask, request, Response, jsonify
+import os, requests
 from flask_cors import CORS
 from dotenv import load_dotenv
+import json
+import random
 
-# ──────────────── setup ──────────────────
+# ─── Setup ─────────────────────────────────────────────────────────────────────
 load_dotenv()
 ARCGIS_URL = os.getenv("ARCGIS_URL", "").rstrip("/")
 if not ARCGIS_URL:
-    raise RuntimeError("Please set ARCGIS_URL in your .env")
+    raise RuntimeError("Missing ARCGIS_URL in .env")
 
 app = Flask(__name__)
 CORS(app)
 
 
-# ──────────────── main proxy ──────────────────
+# ─── Proxy + Sampling Endpoint ─────────────────────────────────────────────────
 @app.route("/api/landmarks", methods=["GET", "POST"])
 def proxy_landmarks():
     """
-    Proxies every request to ARCGIS_URL/query, then:
-      • If it’s valid GeoJSON with >3000 features → random.sample to 3000
-      • Else → passthrough unmodified
+    Proxies *every* request to <ARCGIS_URL>/query but forces:
+      • f=geojson
+      • returnGeometry=true
+      • outFields=*
+      • where=1=1 (if not provided)
+    Then, if the GeoJSON has more than 3000 features, randomly samples 3000.
     """
     endpoint = f"{ARCGIS_URL}/query"
 
-    # 1) Forward the request
+    # 1) Build our outgoing params (for GET) or body (for POST)
     if request.method == "GET":
-        # ensure we get geojson
-        params = request.args.to_dict()
+        params = request.args.to_dict(flat=True)
+        # enforce the essentials
         params["f"] = "geojson"
+        params.setdefault("where", "1=1")
+        params["outFields"] = "*"
+        params["returnGeometry"] = "true"
         upstream = requests.get(endpoint, params=params, timeout=30)
-    else:
+
+    else:  # POST
+        # assume JSON body
+        try:
+            body = request.get_json(force=True)
+        except Exception:
+            body = {}
+        body["f"] = "geojson"
+        body.setdefault("where", "1=1")
+        body["outFields"] = "*"
+        body["returnGeometry"] = "true"
         upstream = requests.post(
             endpoint,
-            data=request.get_data(),
-            headers={"Content-Type": request.headers.get("Content-Type")},
+            json=body,
+            headers={"Content-Type": "application/json"},
             timeout=30
         )
 
-    # 2) If ArcGIS failed, just bubble up the error
+    # 2) If ArcGIS errored, just pass it through
     if upstream.status_code != 200:
         return Response(
             upstream.content,
@@ -48,38 +63,36 @@ def proxy_landmarks():
             content_type=upstream.headers.get("Content-Type", "application/json")
         )
 
-    # 3) If it’s JSON, try sampling
     content_type = upstream.headers.get("Content-Type", "")
+    payload = upstream.content
+
+    # 3) If it’s GeoJSON, sample features down to 3000
     if "application/json" in content_type:
         try:
-            data = upstream.json()
-            feats = data.get("features")
-            if isinstance(feats, list) and len(feats) > 3000:
-                data["features"] = random.sample(feats, 3000)
-            return Response(
-                json.dumps(data),
-                status=200,
-                content_type="application/json"
-            )
+            data = json.loads(upstream.content)
+            features = data.get("features")
+            if isinstance(features, list) and len(features) > 3000:
+                data["features"] = random.sample(features, 3000)
+            payload = json.dumps(data).encode("utf-8")
         except Exception:
-            # parsing error? fall through to raw passthrough
+            # parse error? fall back to the raw payload
             pass
 
-    # 4) Non-JSON or parse error: passthrough
+    # 4) Return the (possibly sampled) GeoJSON
     return Response(
-        upstream.content,
+        payload,
         status=200,
-        content_type=content_type
+        content_type="application/json"
     )
 
 
-# ──────────────── health check ──────────────────
+# ─── Health Check ──────────────────────────────────────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify(status="healthy", arcgis=ARCGIS_URL), 200
+    return jsonify(status="healthy", arcgis_url=ARCGIS_URL), 200
 
 
-# ──────────────── run ──────────────────
+# ─── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
