@@ -13,15 +13,14 @@ ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
 app = Flask(__name__)
 CORS(app)
 
-def create_clusters(features, zoom_level, cluster_distance=50):
-    """Create clusters from features based on geographic proximity"""
+def create_clusters(features, zoom_level):
+    """Create clusters from features based on geographic proximity and zoom level"""
     
-    # Debug logging
     print(f"DEBUG: create_clusters called with zoom={zoom_level}, features={len(features)}")
     
     # At zoom 12+, return individual points with is_cluster=False
     if zoom_level >= 12:
-        print("DEBUG: High zoom - returning individual points")
+        print("DEBUG: High zoom (12+) - returning individual points")
         for feature in features:
             if 'properties' not in feature:
                 feature['properties'] = {}
@@ -30,15 +29,25 @@ def create_clusters(features, zoom_level, cluster_distance=50):
         return features
     
     # At lower zoom levels, create clusters
-    print("DEBUG: Low zoom - creating clusters")
+    print("DEBUG: Low zoom (<12) - creating clusters")
+    
+    # Dynamic cluster distance based on zoom level
+    # Lower zoom = larger clusters, higher zoom = smaller clusters
+    if zoom_level <= 6:
+        cluster_distance_km = 100  # 100km at very low zoom
+    elif zoom_level <= 8:
+        cluster_distance_km = 50   # 50km at low zoom
+    elif zoom_level <= 10:
+        cluster_distance_km = 20   # 20km at medium zoom
+    else:
+        cluster_distance_km = 10   # 10km at medium-high zoom
+    
+    # Convert km to degrees (rough approximation: 1 degree ≈ 111km)
+    cluster_radius_degrees = cluster_distance_km / 111.0
+    print(f"DEBUG: Zoom {zoom_level} - using cluster radius: {cluster_distance_km}km ({cluster_radius_degrees:.4f} degrees)")
+    
     clusters = []
     unclustered = features[:]
-    
-    # Calculate cluster distance based on zoom level
-    # More aggressive clustering at lower zoom levels
-    cluster_radius_degrees = cluster_distance / (111000 * (2 ** (zoom_level - 1)))
-    print(f"DEBUG: Cluster radius: {cluster_radius_degrees} degrees")
-    
     cluster_id = 0
     
     while unclustered:
@@ -58,7 +67,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
         for feature in unclustered:
             coords = feature.get('geometry', {}).get('coordinates', [0, 0])
             if len(coords) >= 2:
-                # Calculate simple distance
+                # Calculate distance between points
                 distance = math.sqrt(
                     (coords[0] - cluster_center_lon) ** 2 + 
                     (coords[1] - cluster_center_lat) ** 2
@@ -66,7 +75,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
                 
                 if distance <= cluster_radius_degrees:
                     cluster_features.append(feature)
-                    # Update cluster center (average of all points)
+                    # Update cluster center (centroid of all points)
                     cluster_center_lon = sum(f.get('geometry', {}).get('coordinates', [0, 0])[0] 
                                            for f in cluster_features) / len(cluster_features)
                     cluster_center_lat = sum(f.get('geometry', {}).get('coordinates', [0, 0])[1] 
@@ -87,7 +96,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
             feature['properties']['cluster_count'] = 1
             clusters.append(feature)
         else:
-            # Create cluster feature
+            # Create cluster feature (2+ points)
             categories = defaultdict(int)
             total_count = len(cluster_features)
             
@@ -99,7 +108,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
             # Find dominant category
             dominant_category = max(categories.items(), key=lambda x: x[1])[0] if categories else 'Unknown'
             
-            # Create cluster feature
+            # Create cluster feature with proper structure
             cluster_feature = {
                 'type': 'Feature',
                 'geometry': {
@@ -110,7 +119,7 @@ def create_clusters(features, zoom_level, cluster_distance=50):
                     'OBJECTID': f"cluster_{cluster_id}",
                     'main_category': dominant_category,
                     'cluster_count': total_count,
-                    'is_cluster': True, 
+                    'is_cluster': True,
                     'categories': dict(categories),
                     'Name': f"Cluster of {total_count} Jewish Sites",
                     'eng_name': f"Cluster ({total_count})",
@@ -120,7 +129,10 @@ def create_clusters(features, zoom_level, cluster_distance=50):
             clusters.append(cluster_feature)
             cluster_id += 1
     
-    print(f"DEBUG: Created {len([c for c in clusters if c.get('properties', {}).get('is_cluster')])} clusters and {len([c for c in clusters if not c.get('properties', {}).get('is_cluster')])} individual points")
+    cluster_count = len([c for c in clusters if c.get('properties', {}).get('is_cluster', False)])
+    point_count = len([c for c in clusters if not c.get('properties', {}).get('is_cluster', False)])
+    print(f"DEBUG: Created {cluster_count} clusters and {point_count} individual points")
+    
     return clusters
 
 def process_features(response_data, zoom_level=10, viewport_bounds=None):
@@ -129,6 +141,7 @@ def process_features(response_data, zoom_level=10, viewport_bounds=None):
         data = json.loads(response_data)
         
         if 'features' not in data:
+            print("DEBUG: No features in response")
             return response_data
         
         features = data['features']
@@ -136,15 +149,21 @@ def process_features(response_data, zoom_level=10, viewport_bounds=None):
         
         print(f"DEBUG: Processing {original_count} features at zoom {zoom_level}")
         
-        # Create consistent seed for viewport if provided
+        if original_count == 0:
+            print("DEBUG: No features to process")
+            return response_data
+        
+        # Create consistent seed for viewport if provided (for reproducible sampling)
         if viewport_bounds:
             seed_str = f"{viewport_bounds.get('west', 0):.3f},{viewport_bounds.get('south', 0):.3f},{viewport_bounds.get('east', 0):.3f},{viewport_bounds.get('north', 0):.3f}"
             seed = hash(seed_str) % (2**32)
             random.seed(seed)
         
-        # Sample features if too many (to prevent overload)
-        max_features_for_processing = 3000
+        # Sample features if too many (to prevent performance issues)
+        max_features_for_processing = 2000
         if len(features) > max_features_for_processing:
+            print(f"DEBUG: Sampling {max_features_for_processing} from {len(features)} features")
+            
             # Prioritize Featured sites
             featured = [f for f in features if f.get('properties', {}).get('main_category') == 'Featured']
             others = [f for f in features if f.get('properties', {}).get('main_category') != 'Featured']
@@ -157,7 +176,7 @@ def process_features(response_data, zoom_level=10, viewport_bounds=None):
                     sampled_others = random.sample(others, remaining_slots)
                 features = featured + sampled_others
             else:
-                features = featured
+                features = featured[:max_features_for_processing]
         
         # Apply clustering logic
         processed_features = create_clusters(features, zoom_level)
@@ -165,7 +184,7 @@ def process_features(response_data, zoom_level=10, viewport_bounds=None):
         # Update the response
         data['features'] = processed_features
         
-        # Add metadata
+        # Add metadata for debugging
         if 'metadata' not in data:
             data['metadata'] = {}
         
@@ -179,14 +198,17 @@ def process_features(response_data, zoom_level=10, viewport_bounds=None):
             'cluster_count': cluster_count,
             'point_count': point_count, 
             'zoom_level': zoom_level,
-            'display_mode': 'clusters' if zoom_level < 12 else 'points'
+            'display_mode': 'clusters' if zoom_level < 12 else 'points',
+            'viewport_bounds': viewport_bounds
         })
         
-        print(f"DEBUG: Returning {cluster_count} clusters and {point_count} points")
+        print(f"DEBUG: Final result - {cluster_count} clusters, {point_count} points")
         return json.dumps(data)
         
     except Exception as e:
         print(f"ERROR: Processing failed: {e}")
+        import traceback
+        traceback.print_exc()
         return response_data
 
 # Main proxy endpoint
@@ -194,6 +216,8 @@ def process_features(response_data, zoom_level=10, viewport_bounds=None):
 @app.route("/api/landmarks/<path:subpath>", methods=["GET", "POST"])
 def proxy_landmarks(subpath):
     """Proxy requests to ArcGIS with smart clustering"""
+    
+    print(f"DEBUG: Request to {request.path} with method {request.method}")
     
     # Determine if this is a feature query
     is_query = request.method == "POST" or "where" in request.args
@@ -205,9 +229,11 @@ def proxy_landmarks(subpath):
             params = dict(request.args)
             zoom_level = int(params.get('zoom', 10))
             
-            print(f"DEBUG: Query with zoom={zoom_level}, params={list(params.keys())}")
+            print(f"DEBUG: GET query with zoom={zoom_level}")
+            print(f"DEBUG: Request params: {list(params.keys())}")
             
             # Handle spatial filtering
+            viewport_bounds = None
             if all(param in params for param in ['xmin', 'ymin', 'xmax', 'ymax']):
                 # Extract bounds
                 xmin = float(params['xmin'])
@@ -215,13 +241,15 @@ def proxy_landmarks(subpath):
                 xmax = float(params['xmax'])
                 ymax = float(params['ymax'])
                 
-                # Create envelope geometry
+                print(f"DEBUG: Spatial bounds - xmin:{xmin}, ymin:{ymin}, xmax:{xmax}, ymax:{ymax}")
+                
+                # Create envelope geometry for ArcGIS
                 envelope = f"{xmin},{ymin},{xmax},{ymax}"
                 params['geometry'] = envelope
                 params['geometryType'] = 'esriGeometryEnvelope'
                 params['spatialRel'] = 'esriSpatialRelIntersects'
-                params['inSR'] = '4326'  # Input spatial reference
-                params['outSR'] = '4326'  # Output spatial reference
+                params['inSR'] = '4326'
+                params['outSR'] = '4326'
                 
                 # Store viewport bounds for processing
                 viewport_bounds = {
@@ -229,11 +257,12 @@ def proxy_landmarks(subpath):
                     'east': xmax, 'north': ymax
                 }
                 
-                # Remove individual bound parameters
+                # Remove individual bound parameters (ArcGIS doesn't need them)
                 for bound_param in ['xmin', 'ymin', 'xmax', 'ymax']:
                     params.pop(bound_param, None)
-            else:
-                viewport_bounds = None
+            
+            # Remove zoom parameter (ArcGIS doesn't understand it)
+            params.pop('zoom', None)
             
             # Ensure we get enough features for clustering
             if 'resultRecordCount' not in params:
@@ -242,8 +271,19 @@ def proxy_landmarks(subpath):
             # Ensure GeoJSON format
             params['f'] = 'geojson'
             
-            # Make the request
-            upstream = requests.get(endpoint, params=params, timeout=30)
+            # Ensure we get all necessary fields
+            if 'outFields' not in params:
+                params['outFields'] = '*'
+            
+            print(f"DEBUG: Final ArcGIS params: {list(params.keys())}")
+            
+            # Make the request to ArcGIS
+            try:
+                upstream = requests.get(endpoint, params=params, timeout=30)
+                print(f"DEBUG: ArcGIS response status: {upstream.status_code}")
+            except Exception as e:
+                print(f"ERROR: ArcGIS request failed: {e}")
+                return jsonify({"error": "ArcGIS request failed"}), 500
             
         else:
             # POST request
@@ -258,6 +298,7 @@ def proxy_landmarks(subpath):
     
     else:
         # Metadata request
+        print("DEBUG: Metadata request")
         upstream = requests.get(ARCGIS_URL, params=request.args, timeout=30)
         return Response(
             upstream.content,
@@ -268,27 +309,48 @@ def proxy_landmarks(subpath):
     # Process the response if it's a successful feature query
     if upstream.status_code == 200 and is_query:
         try:
-            # Process features with clustering
-            processed_content = process_features(
-                upstream.content.decode('utf-8'),
-                zoom_level=zoom_level,
-                viewport_bounds=viewport_bounds
-            )
+            response_text = upstream.content.decode('utf-8')
+            print(f"DEBUG: ArcGIS returned {len(response_text)} characters")
             
-            return Response(
-                processed_content,
-                status=200,
-                content_type="application/json"
-            )
+            # Quick check if response contains features
+            if '"features"' in response_text:
+                # Process features with clustering
+                processed_content = process_features(
+                    response_text,
+                    zoom_level=zoom_level,
+                    viewport_bounds=viewport_bounds
+                )
+                
+                return Response(
+                    processed_content,
+                    status=200,
+                    content_type="application/json",
+                    headers={
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                        'Access-Control-Allow-Headers': 'Content-Type'
+                    }
+                )
+            else:
+                print("DEBUG: No features in ArcGIS response")
+                return Response(
+                    response_text,
+                    status=200,
+                    content_type="application/json"
+                )
             
         except Exception as e:
             print(f"ERROR: Failed to process response: {e}")
+            import traceback
+            traceback.print_exc()
             # Return original response on error
             return Response(
                 upstream.content,
                 status=upstream.status_code,
                 content_type=upstream.headers.get("Content-Type", "application/json")
             )
+    else:
+        print(f"DEBUG: Non-successful or non-query response: {upstream.status_code}")
     
     # Return original response for non-successful or non-query requests
     return Response(
@@ -297,7 +359,13 @@ def proxy_landmarks(subpath):
         content_type=upstream.headers.get("Content-Type", "application/json")
     )
 
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Simple health check endpoint"""
+    return jsonify({"status": "healthy", "arcgis_url": ARCGIS_URL}), 200
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"Starting server on port {port}")
+    print(f"ArcGIS URL: {ARCGIS_URL}")
     app.run(host="0.0.0.0", port=port, debug=True)
