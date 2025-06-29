@@ -11,12 +11,108 @@ ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
 app = Flask(__name__)
 CORS(app)
 
+import math
+from collections import defaultdict
+
+def create_clusters(features, zoom_level, cluster_distance=50):
+    """Create clusters from features based on geographic proximity"""
+    if zoom_level >= 12:
+        # At high zoom, return individual points
+        return features
+    
+    # Group features into clusters based on geographic proximity
+    clusters = []
+    unclustered = features[:]
+    
+    # Calculate cluster distance based on zoom (smaller distance = more clusters at higher zoom)
+    # At zoom 3: ~200km apart, at zoom 11: ~5km apart
+    cluster_radius_degrees = cluster_distance / (111000 * (2 ** (zoom_level - 3)))
+    
+    while unclustered:
+        # Start a new cluster with the first unclustered point
+        seed_feature = unclustered.pop(0)
+        seed_coords = seed_feature.get('geometry', {}).get('coordinates', [0, 0])
+        
+        if not seed_coords or len(seed_coords) < 2:
+            continue
+            
+        cluster_features = [seed_feature]
+        cluster_center_lon = seed_coords[0]
+        cluster_center_lat = seed_coords[1]
+        
+        # Find all features within cluster radius
+        remaining = []
+        for feature in unclustered:
+            coords = feature.get('geometry', {}).get('coordinates', [0, 0])
+            if len(coords) >= 2:
+                distance = math.sqrt(
+                    (coords[0] - cluster_center_lon) ** 2 + 
+                    (coords[1] - cluster_center_lat) ** 2
+                )
+                
+                if distance <= cluster_radius_degrees:
+                    cluster_features.append(feature)
+                    # Update cluster center (simple average)
+                    cluster_center_lon = sum(f.get('geometry', {}).get('coordinates', [0, 0])[0] 
+                                           for f in cluster_features) / len(cluster_features)
+                    cluster_center_lat = sum(f.get('geometry', {}).get('coordinates', [0, 0])[1] 
+                                           for f in cluster_features) / len(cluster_features)
+                else:
+                    remaining.append(feature)
+            else:
+                remaining.append(feature)
+        
+        unclustered = remaining
+        
+        if len(cluster_features) == 1:
+            # Single point - return as individual feature (but limit details for security)
+            feature = cluster_features[0]
+            feature['properties'] = {
+                'id': feature.get('properties', {}).get('OBJECTID', 0),
+                'main_category': feature.get('properties', {}).get('main_category', 'Unknown'),
+                'cluster_count': 1,
+                'is_cluster': False
+            }
+            clusters.append(feature)
+        else:
+            # Create cluster feature
+            # Count categories in cluster
+            categories = defaultdict(int)
+            total_count = len(cluster_features)
+            
+            for feature in cluster_features:
+                category = feature.get('properties', {}).get('main_category', 'Unknown')
+                categories[category] += 1
+            
+            # Find dominant category
+            dominant_category = max(categories.items(), key=lambda x: x[1])[0]
+            
+            cluster_feature = {
+                'type': 'Feature',
+                'geometry': {
+                    'type': 'Point',
+                    'coordinates': [cluster_center_lon, cluster_center_lat]
+                },
+                'properties': {
+                    'id': f"cluster_{len(clusters)}",
+                    'main_category': dominant_category,
+                    'cluster_count': total_count,
+                    'is_cluster': True,
+                    'categories': dict(categories),
+                    'Name': f"Cluster of {total_count} Jewish Sites",
+                    'Address': f"{total_count} sites in this area"
+                }
+            }
+            clusters.append(cluster_feature)
+    
+    return clusters
+
 def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, max_features=1000):
-    """Smart sampling based on zoom level and consistent viewport seeding"""
+    """Smart sampling with server-side clustering for security"""
     try:
         data = json.loads(response_data)
         
-        if 'features' not in data or len(data['features']) <= max_features:
+        if 'features' not in data:
             return response_data
         
         features = data['features']
@@ -27,154 +123,75 @@ def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, 
             seed = hash(seed_str) % (2**32)
             random.seed(seed)
         
-        # Adjust max features based on zoom level - MORE GENEROUS
-        if zoom_level >= 15:  # Street level - more detail
-            adjusted_max = min(max_features * 2, 2000)
-        elif zoom_level >= 12:  # Neighborhood level
-            adjusted_max = max_features
-        elif zoom_level >= 9:   # City level
-            adjusted_max = max_features  # INCREASED from max_features // 2
-        elif zoom_level >= 6:   # Country level  
-            adjusted_max = max_features // 2  # INCREASED from max_features // 4
-        else:  # World level
-            adjusted_max = max_features // 3  # INCREASED from max_features // 4
-        
-        # Smart sampling based on zoom and importance
-        if zoom_level >= 10:
-            # At neighborhood/street level: prioritize important features + random sample
-            important_features = []
-            regular_features = []
+        # Smart zoom-based strategy with clustering
+        if zoom_level >= 12:
+            # High zoom: Individual points with sampling
+            adjusted_max = 1500  # Reasonable number of individual points
+            
+            # Prioritize Featured, then sample others
+            featured_features = []
+            other_features = []
             
             for feature in features:
-                importance = feature.get('properties', {}).get('importance', 0)
                 category = feature.get('properties', {}).get('main_category', '')
-                
-                # Prioritize Featured and high importance
-                if category == 'Featured' or importance >= 8:
-                    important_features.append(feature)
-                else:
-                    regular_features.append(feature)
-            
-            # Include all important features first
-            sampled_features = important_features[:adjusted_max]
-            
-            # Fill remaining slots with random selection from regular features
-            remaining_slots = adjusted_max - len(sampled_features)
-            if remaining_slots > 0 and regular_features:
-                random_regular = random.sample(regular_features, min(remaining_slots, len(regular_features)))
-                sampled_features.extend(random_regular)
-                
-        elif zoom_level >= 6:
-            # At region/country level: geographic distribution + importance
-            # Group features by rough geographic regions
-            regions = {}
-            for feature in features:
-                # Get coordinates for geographic grouping
-                geom = feature.get('geometry', {})
-                if geom.get('type') == 'Point':
-                    coords = geom.get('coordinates', [0, 0])
-                    lon, lat = coords[0], coords[1]
-                    
-                    # Simple geographic regions based on coordinates
-                    if -10 <= lon <= 50 and 30 <= lat <= 70:
-                        region = 'Europe'
-                    elif 50 <= lon <= 150 and 10 <= lat <= 70:
-                        region = 'Asia'
-                    elif -180 <= lon <= -30:
-                        region = 'Americas'
-                    elif 10 <= lon <= 55 and -35 <= lat <= 30:
-                        region = 'Africa'
-                    elif 110 <= lon <= 180 and -50 <= lat <= 10:
-                        region = 'Oceania'
-                    else:
-                        region = 'Other'
-                    
-                    if region not in regions:
-                        regions[region] = []
-                    regions[region].append(feature)
-            
-            # Sample from each region proportionally
-            sampled_features = []
-            total_regions = len(regions)
-            
-            for region, region_features in regions.items():
-                # Sort region features by priority
-                def get_priority(feature):
-                    props = feature.get('properties', {})
-                    category = props.get('main_category', '')
-                    importance = props.get('importance', 0)
-                    
-                    if category == 'Featured':
-                        return 1000 + importance
-                    elif category == 'Synagogue':
-                        return 800 + importance
-                    elif category == 'Heritage':
-                        return 600 + importance
-                    else:
-                        return importance
-                
-                sorted_region_features = sorted(region_features, key=get_priority, reverse=True)
-                
-                # Allocate features per region (minimum 10% of total, rest proportional)
-                region_quota = max(adjusted_max // 10, 
-                                 int(adjusted_max * len(region_features) / len(features)))
-                region_quota = min(region_quota, len(sorted_region_features))
-                
-                sampled_features.extend(sorted_region_features[:region_quota])
-            
-            # If we still have room, add more from largest regions
-            remaining_slots = adjusted_max - len(sampled_features)
-            if remaining_slots > 0:
-                all_remaining = []
-                for region_features in regions.values():
-                    all_remaining.extend(region_features)
-                
-                # Remove already selected features
-                remaining_features = [f for f in all_remaining if f not in sampled_features]
-                if remaining_features:
-                    additional = random.sample(remaining_features, 
-                                             min(remaining_slots, len(remaining_features)))
-                    sampled_features.extend(additional)
-                
-        else:
-            # At world level: only show most important features, geographically distributed
-            def get_priority(feature):
-                props = feature.get('properties', {})
-                category = props.get('main_category', '')
-                importance = props.get('importance', 0)
-                
-                # Priority scoring
                 if category == 'Featured':
-                    return 1000 + importance
-                elif category == 'Synagogue':
-                    return 800 + importance
-                elif category == 'Heritage':
-                    return 600 + importance
+                    featured_features.append(feature)
                 else:
-                    return importance
+                    other_features.append(feature)
             
-            sorted_features = sorted(features, key=get_priority, reverse=True)
-            sampled_features = sorted_features[:adjusted_max]
+            sampled_features = featured_features[:]
+            remaining_slots = adjusted_max - len(sampled_features)
+            
+            if remaining_slots > 0 and other_features:
+                if len(other_features) <= remaining_slots:
+                    sampled_features.extend(other_features)
+                else:
+                    random_others = random.sample(other_features, remaining_slots)
+                    sampled_features.extend(random_others)
         
-        # Update data with sampled features
+        else:
+            # Low zoom: Use clustering for security
+            # First sample a larger set for clustering
+            sample_size = min(3000, len(features))  # Get enough points for good clustering
+            
+            # Prioritize Featured sites in the sample
+            featured_features = [f for f in features if f.get('properties', {}).get('main_category') == 'Featured']
+            other_features = [f for f in features if f.get('properties', {}).get('main_category') != 'Featured']
+            
+            # Always include all Featured sites
+            sample_features = featured_features[:]
+            remaining_slots = sample_size - len(sample_features)
+            
+            if remaining_slots > 0 and other_features:
+                if len(other_features) <= remaining_slots:
+                    sample_features.extend(other_features)
+                else:
+                    random_others = random.sample(other_features, remaining_slots)
+                    sample_features.extend(random_others)
+            
+            # Create clusters from the sampled features
+            sampled_features = create_clusters(sample_features, zoom_level)
+        
+        # Update data with processed features
         data['features'] = sampled_features
         
-        # Add metadata about sampling
+        # Add metadata about processing
         if 'metadata' not in data:
             data['metadata'] = {}
         data['metadata'].update({
-            'sampled': True,
+            'processed': True,
             'original_count': len(features),
             'returned_count': len(sampled_features),
             'zoom_level': zoom_level,
-            'sampling_strategy': 'smart_zoom_based'
+            'display_mode': 'clusters' if zoom_level < 12 else 'points',
+            'cluster_count': len([f for f in sampled_features if f.get('properties', {}).get('is_cluster', False)]) if zoom_level < 12 else 0
         })
         
         return json.dumps(data)
         
     except Exception as e:
         # If anything goes wrong, return original data
-        print(f"Sampling error: {e}")
+        print(f"Processing error: {e}")
         return response_data
 
 # 2. Catch both the base path and ANY sub-path under /api/landmarks
