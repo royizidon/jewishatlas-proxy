@@ -108,7 +108,6 @@ def limit_features_randomly(response_data, viewport_bounds=None, zoom_level=10, 
 @app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET", "POST"])
 @app.route("/api/landmarks/<path:subpath>",                methods=["GET", "POST"])
 def proxy_landmarks(subpath):
-    print(f"DEBUG: Received params: {dict(request.args)}")
     """
     - metadata requests (no 'where' + GET) → ARCGIS_URL?f=json
     - feature queries (has 'where' or it's a POST) → ARCGIS_URL/query
@@ -129,7 +128,7 @@ def proxy_landmarks(subpath):
                 params['geometry'] = envelope
                 params['geometryType'] = 'esriGeometryEnvelope'
                 params['spatialRel'] = 'esriSpatialRelIntersects'
-                params['inSR'] = '4326'
+                params['inSR'] = '3857'  # Changed from 4326 to 3857 (Web Mercator)
                 
                 # Remove the individual bound parameters since we've used them
                 for bound_param in ['xmin', 'ymin', 'xmax', 'ymax']:
@@ -174,6 +173,11 @@ def proxy_landmarks(subpath):
                     'north': float(request.args.get('ymax', 0))
                 }
                 zoom_level = int(request.args.get('zoom', 10))
+                
+                # Add more debug info
+                print(f"DEBUG: Viewport bounds: {viewport_bounds}")
+                print(f"DEBUG: Zoom level: {zoom_level}")
+                print(f"DEBUG: Should sample: {should_sample}")
         
         if should_sample:
             # Apply smart sampling based on zoom and viewport
