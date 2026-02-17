@@ -152,6 +152,9 @@ def api_wall():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/")
+def health():
+    return "OK", 200
 
 
 # =========================
