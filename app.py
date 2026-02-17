@@ -159,13 +159,10 @@ def api_wall():
 # =========================
 @app.route("/api/dedicate", methods=["POST"])
 def api_dedicate():
-
     if not MEMORIAL_LAYER_URL:
         return jsonify({"error": "MEMORIAL_LAYER_URL not set"}), 500
 
     try:
-        
-
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         token = get_arcgis_token()
 
@@ -188,27 +185,25 @@ def api_dedicate():
         # Build attributes
         # --------------------------
         attrs = {
-        "slug": slug,
-        "he_name": he_name,
-        "eng_name": eng_name,
-        "born_str": data.get("born_str"),
-        "death_str": data.get("death_str"),
-        "born_display": data.get("born_date"),
-        "death_display": data.get("death_date"),
-        "origin": data.get("origin"),
-        "full_bio": data.get("full_bio"),
-        "tier": data.get("tier") or "brick",
-        "memorial_type": "memory",
-        "is_published": 0,
-        "payment_status": "pending",
-        "dedicator_email": data.get("dedicator_email"),
-        "created": now_str,
-        "updated": now_str,
-    }      
+            "slug": slug,
+            "he_name": he_name,
+            "eng_name": eng_name,
+            "born_str": data.get("born_str"),
+            "death_str": data.get("death_str"),
+            "born_display": data.get("born_date"),
+            "death_display": data.get("death_date"),
+            "origin": data.get("origin"),
+            "full_bio": data.get("full_bio"),
+            "tier": data.get("tier") or "brick",
+            "memorial_type": "memory",
+            "is_published": 0,
+            "payment_status": "pending",
+            "dedicator_email": data.get("dedicator_email"),
+            "created": now_str,
+            "updated": now_str,
+        }
 
         feature = {"attributes": attrs}
-
-        
 
         # --------------------------
         # Insert feature
@@ -242,7 +237,6 @@ def api_dedicate():
             file = request.files["image"]
 
             if file and file.filename:
-
                 files = {
                     "attachment": (file.filename, file.stream, file.mimetype)
                 }
@@ -271,7 +265,6 @@ def api_dedicate():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 # =========================
 # Run
