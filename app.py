@@ -5,20 +5,19 @@ import time
 import requests
 from flask_cors import CORS
 from dotenv import load_dotenv
-from datetime import datetime          
+from datetime import datetime
 
 # =========================
 # Load env
 # =========================
 load_dotenv()
 
-ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()  # map layer
-MEMORIAL_LAYER_URL = os.getenv("MEMORIAL_LAYER_URL", "").strip()  # wall layer
+ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
+MEMORIAL_LAYER_URL = os.getenv("MEMORIAL_LAYER_URL", "").strip()
 
 ARCGIS_USERNAME = os.getenv("ARCGIS_USERNAME", "").strip()
 ARCGIS_PASSWORD = os.getenv("ARCGIS_PASSWORD", "").strip()
 
-from datetime import datetime
 
 def parse_date_to_ms(date_str):
     if not date_str:
@@ -36,13 +35,10 @@ CORS(app)
 # =========================
 # ArcGIS Token (cached)
 # =========================
-_TOKEN_CACHE = {"token": None, "expires": 0}  # expires is unix time (seconds)
+_TOKEN_CACHE = {"token": None, "expires": 0}
+
 
 def get_arcgis_token():
-    """
-    Generates an ArcGIS Online token using username/password.
-    Caches token until near expiration.
-    """
     if not ARCGIS_USERNAME or not ARCGIS_PASSWORD:
         raise RuntimeError("Missing ARCGIS_USERNAME or ARCGIS_PASSWORD in .env")
 
@@ -52,15 +48,13 @@ def get_arcgis_token():
 
     url = "https://www.arcgis.com/sharing/rest/generateToken"
     payload = {
-    "username": ARCGIS_USERNAME,
-    "password": ARCGIS_PASSWORD,
-    "client": "referer",
-    "referer": "https://api.jewishatlas.org",  # must match your backend domain
-    "expiration": 60,
-    "f": "json",
-}
-
-
+        "username": ARCGIS_USERNAME,
+        "password": ARCGIS_PASSWORD,
+        "client": "referer",
+        "referer": "https://api.jewishatlas.org",
+        "expiration": 60,
+        "f": "json",
+    }
 
     r = requests.post(url, data=payload, timeout=30)
     data = r.json()
@@ -69,7 +63,6 @@ def get_arcgis_token():
         raise RuntimeError(f"Token error: {data}")
 
     token = data["token"]
-    # expires from AGO is in milliseconds since epoch
     expires_ms = data.get("expires", 0)
     expires_sec = int(expires_ms / 1000) if expires_ms else int(now + 55 * 60)
 
@@ -77,16 +70,21 @@ def get_arcgis_token():
     _TOKEN_CACHE["expires"] = expires_sec
     return token
 
+
 # =========================
-# Existing Map Proxy (UNCHANGED)
+# Health check
+# =========================
+@app.route("/")
+def health():
+    return "OK", 200
+
+
+# =========================
+# Map Proxy
 # =========================
 @app.route("/api/landmarks", defaults={"subpath": None}, methods=["GET", "POST"])
 @app.route("/api/landmarks/<path:subpath>", methods=["GET", "POST"])
 def proxy_landmarks(subpath):
-    """
-    - metadata requests (no 'where' + GET) → ARCGIS_URL?f=json
-    - feature queries (has 'where' or it's a POST) → ARCGIS_URL/query
-    """
     if not ARCGIS_URL:
         return Response(
             json.dumps({"error": "ARCGIS_URL not set"}),
@@ -115,8 +113,9 @@ def proxy_landmarks(subpath):
         content_type=upstream.headers.get("Content-Type", "application/json"),
     )
 
+
 # =========================
-# NEW: Test token quickly
+# Test token
 # =========================
 @app.route("/api/test-token", methods=["GET"])
 def api_test_token():
@@ -126,8 +125,9 @@ def api_test_token():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
 # =========================
-# NEW: Wall list (published only)
+# Wall list (published only)
 # =========================
 @app.route("/api/wall", methods=["GET"])
 def api_wall():
@@ -139,7 +139,7 @@ def api_wall():
 
         params = {
             "where": "is_published = 1",
-            "outFields": "slug,he_name,eng_name,born_str,death_str,born_date,death_date,origin,tier",
+            "outFields": "slug,he_name,eng_name,born_str,death_str,born_display,death_display,origin,tier",
             "orderByFields": "updated_at DESC",
             "f": "json",
             "token": token,
@@ -152,13 +152,28 @@ def api_wall():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/")
-def health():
-    return "OK", 200
+# =========================
+# Debug fields (TEMP)
+# =========================
+@app.route("/api/debug-fields", methods=["GET"])
+def debug_fields():
+    try:
+        token = get_arcgis_token()
+        res = requests.get(
+            MEMORIAL_LAYER_URL,
+            params={"f": "json", "token": token},
+            timeout=30
+        )
+        data = res.json()
+        fields = [{"name": f["name"], "type": f.get("type")} for f in data.get("fields", [])]
+        return jsonify({"fields": fields, "raw_keys": [f["name"] for f in data.get("fields", [])]})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
 # =========================
-# NEW: Dedicate (insert draft)
+# Dedicate (insert draft)
 # =========================
 @app.route("/api/dedicate", methods=["POST"])
 def api_dedicate():
@@ -169,9 +184,7 @@ def api_dedicate():
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         token = get_arcgis_token()
 
-        # --------------------------
         # Read form fields
-        # --------------------------
         data = request.form
 
         slug = data.get("slug")
@@ -184,9 +197,7 @@ def api_dedicate():
         if not (he_name or eng_name):
             return jsonify({"error": "Name required"}), 400
 
-        # --------------------------
         # Build attributes
-        # --------------------------
         attrs = {
             "slug": slug,
             "he_name": he_name,
@@ -204,13 +215,15 @@ def api_dedicate():
             "dedicator_email": data.get("dedicator_email"),
             "created": now_str,
             "updated": now_str,
+
         }
 
         feature = {"attributes": attrs}
 
-        # --------------------------
+        # TEMP DEBUG
+        print("SENT ATTRS:", json.dumps(attrs, ensure_ascii=False))
+
         # Insert feature
-        # --------------------------
         insert_res = requests.post(
             f"{MEMORIAL_LAYER_URL}/applyEdits",
             data={
@@ -223,6 +236,9 @@ def api_dedicate():
 
         insert_json = insert_res.json()
 
+        # TEMP DEBUG
+        print("ARCGIS RESPONSE:", json.dumps(insert_json))
+
         add_results = insert_json.get("addResults", [])
         if not add_results:
             return jsonify({"error": insert_json}), 500
@@ -233,9 +249,7 @@ def api_dedicate():
 
         object_id = add_result["objectId"]
 
-        # --------------------------
         # Upload image (if exists)
-        # --------------------------
         if "image" in request.files:
             file = request.files["image"]
 
@@ -268,7 +282,7 @@ def api_dedicate():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-        
+
 
 # =========================
 # Run
