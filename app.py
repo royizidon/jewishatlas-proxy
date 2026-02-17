@@ -261,13 +261,37 @@ def api_dedicate():
                 if not attach_json.get("addAttachmentResult", {}).get("success"):
                     return jsonify({"error": "Image upload failed", "details": attach_json}), 500
 
+
+  # TEMP DEBUG — remove later
+        print("SENT ATTRS:", json.dumps(attrs, ensure_ascii=False))
+        print("ARCGIS RESPONSE:", json.dumps(insert_json))
+        
         return jsonify({
             "success": True,
             "objectId": object_id
         })
 
+  
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/debug-fields", methods=["GET"])
+def debug_fields():
+    try:
+        token = get_arcgis_token()
+        res = requests.get(
+            MEMORIAL_LAYER_URL,
+            params={"f": "json", "token": token},
+            timeout=30
+        )
+        data = res.json()
+        fields = [{"name": f["name"], "type": f["esriFieldType"] if "esriFieldType" in f else f.get("type")} for f in data.get("fields", [])]
+        return jsonify({"fields": fields, "raw_keys": [f["name"] for f in data.get("fields", [])]})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500        
 
 # =========================
 # Run
