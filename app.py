@@ -200,7 +200,7 @@ def api_dedicate():
         "updated_at": int(time.time() * 1000),
     }      
 
-        feature = {"attributes": attrs}
+        feature = {"attributes": attrs, "geometry": None}
 
 
 
