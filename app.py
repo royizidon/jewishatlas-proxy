@@ -5,6 +5,7 @@ import time
 import requests
 from flask_cors import CORS
 from dotenv import load_dotenv
+from datetime import datetime          
 
 # =========================
 # Load env
@@ -16,6 +17,18 @@ MEMORIAL_LAYER_URL = os.getenv("MEMORIAL_LAYER_URL", "").strip()  # wall layer
 
 ARCGIS_USERNAME = os.getenv("ARCGIS_USERNAME", "").strip()
 ARCGIS_PASSWORD = os.getenv("ARCGIS_PASSWORD", "").strip()
+
+from datetime import datetime
+
+def parse_date_to_ms(date_str):
+    if not date_str:
+        return None
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        return None
+
 
 app = Flask(__name__)
 CORS(app)
@@ -41,10 +54,12 @@ def get_arcgis_token():
     payload = {
     "username": ARCGIS_USERNAME,
     "password": ARCGIS_PASSWORD,
-    "client": "requestip",
+    "client": "referer",
+    "referer": "https://api.jewishatlas.org",  # must match your backend domain
     "expiration": 60,
     "f": "json",
-    }
+}
+
 
 
     r = requests.post(url, data=payload, timeout=30)
@@ -167,19 +182,23 @@ def api_dedicate():
         # Build attributes
         # --------------------------
         attrs = {
-            "slug": slug,
-            "he_name": he_name,
-            "eng_name": eng_name,
-            "born_str": data.get("born_str"),
-            "death_str": data.get("death_str"),
-            "origin": data.get("origin"),
-            "full_bio": data.get("full_bio"),
-            "tier": data.get("tier") or "brick",
-            "memorial_type": "memory",
-            "is_published": 0,
-            "payment_status": "pending",
-            "dedicator_email": data.get("dedicator_email"),
-        }
+        "slug": slug,
+        "he_name": he_name,
+        "eng_name": eng_name,
+        "born_str": data.get("born_str"),
+        "death_str": data.get("death_str"),
+        "born_date": parse_date_to_ms(data.get("born_date")),
+        "death_date": parse_date_to_ms(data.get("death_date")),
+        "origin": data.get("origin"),
+        "full_bio": data.get("full_bio"),
+        "tier": data.get("tier") or "brick",
+        "memorial_type": "memory",
+        "is_published": 0,
+        "payment_status": "pending",
+        "dedicator_email": data.get("dedicator_email"),
+        "created_at": int(time.time() * 1000),
+        "updated_at": int(time.time() * 1000),
+    }      
 
         feature = {"attributes": attrs}
 
