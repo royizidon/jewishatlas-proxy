@@ -161,6 +161,9 @@ def api_dedicate():
         return jsonify({"error": "MEMORIAL_LAYER_URL not set"}), 500
 
     try:
+        
+
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         token = get_arcgis_token()
 
         # --------------------------
@@ -187,8 +190,8 @@ def api_dedicate():
         "eng_name": eng_name,
         "born_str": data.get("born_str"),
         "death_str": data.get("death_str"),
-        "born_date": parse_date_to_ms(data.get("born_date")),
-        "death_date": parse_date_to_ms(data.get("death_date")),
+        "born_display": data.get("born_display"),
+        "death_display": data.get("death_display"),
         "origin": data.get("origin"),
         "full_bio": data.get("full_bio"),
         "tier": data.get("tier") or "brick",
@@ -196,11 +199,11 @@ def api_dedicate():
         "is_published": 0,
         "payment_status": "pending",
         "dedicator_email": data.get("dedicator_email"),
-        "created_at": int(time.time() * 1000),
-        "updated_at": int(time.time() * 1000),
+        "created": now_str,
+        "updated": now_str,
     }      
 
-        feature = {"attributes": attrs, "geometry": None}
+        feature = {"attributes": attrs}
 
 
 
