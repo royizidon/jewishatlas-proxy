@@ -152,15 +152,6 @@ def api_wall():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/debug-fields", methods=["GET"])
-def debug_fields():
-    try:
-        token = get_arcgis_token()
-        res = requests.get(f"{MEMORIAL_LAYER_URL}", params={"f": "json", "token": token}, timeout=30)
-        fields = res.json().get("fields", [])
-        return jsonify({"fields": [{"name": f["name"], "type": f["type"]} for f in fields]})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 # =========================
