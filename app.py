@@ -202,11 +202,6 @@ def api_dedicate():
 
         feature = {"attributes": attrs}
 
-       payload = {
-        "f": "json",
-        "token": token,
-        "features": json.dumps([feature]),
-    }
 
 
         # --------------------------
