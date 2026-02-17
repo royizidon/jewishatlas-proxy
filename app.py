@@ -213,20 +213,24 @@ def api_dedicate():
         # Insert feature
         # --------------------------
         insert_res = requests.post(
-            f"{MEMORIAL_LAYER_URL}/addFeatures",
-            data=payload,
+            f"{MEMORIAL_LAYER_URL}/applyEdits",
+            data={
+                "f": "json",
+                "token": token,
+                "adds": json.dumps([feature]),
+            },
             timeout=30
         )
 
         insert_json = insert_res.json()
 
-        if not insert_json.get("addResults"):
+        add_results = insert_json.get("addResults", [])
+        if not add_results:
             return jsonify({"error": insert_json}), 500
 
-        add_result = insert_json["addResults"][0]
-
+        add_result = add_results[0]
         if not add_result.get("success"):
-            return jsonify({"error": insert_json}), 500
+            return jsonify({"error": add_result}), 500
 
         object_id = add_result["objectId"]
 
