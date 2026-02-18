@@ -173,6 +173,25 @@ def debug_fields():
 
 
 # =========================
+# Debug row (TEMP)
+# =========================
+@app.route("/api/debug-row/<int:oid>", methods=["GET"])
+def debug_row(oid):
+    try:
+        token = get_arcgis_token()
+        params = {
+            "where": f"OBJECTID = {oid}",
+            "outFields": "*",
+            "f": "json",
+            "token": token,
+        }
+        res = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=30)
+        return Response(res.content, content_type="application/json")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# =========================
 # Dedicate (insert draft)
 # =========================
 @app.route("/api/dedicate", methods=["POST"])
@@ -215,8 +234,12 @@ def api_dedicate():
             "dedicator_email": data.get("dedicator_email"),
             "created": now_str,
             "updated": now_str,
-
+            "created_at": int(time.time() * 1000),
+            "updated_at": int(time.time() * 1000),
         }
+
+        # Remove None values — ArcGIS can silently drop all attrs if any are None
+        attrs = {k: v for k, v in attrs.items() if v is not None}
 
         feature = {"attributes": attrs}
 
