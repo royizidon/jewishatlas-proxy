@@ -234,8 +234,7 @@ def api_dedicate():
             "dedicator_email": data.get("dedicator_email"),
             "created": now_str,
             "updated": now_str,
-            "created_at": int(time.time() * 1000),
-            "updated_at": int(time.time() * 1000),
+
         }
 
         # Remove None values — ArcGIS can silently drop all attrs if any are None
