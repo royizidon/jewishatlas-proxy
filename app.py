@@ -138,7 +138,7 @@ def api_wall():
         token = get_arcgis_token()
 
         params = {
-            "where": "is_published = 1",
+            "where": "1=1",
             "outFields": "slug,he_name,eng_name,born_str,death_str,born_display,death_display,origin,tier",
             "orderByFields": "updated_at DESC",
             "f": "json",
