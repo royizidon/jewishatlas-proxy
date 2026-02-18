@@ -140,7 +140,7 @@ def api_wall():
         params = {
             "where": "1=1",
             "outFields": "slug,he_name,eng_name,born_str,death_str,born_display,death_display,origin,tier",
-            "orderByFields": "updated_at DESC",
+            "orderByFields": "OBJECTID DESC",
             "f": "json",
             "token": token,
         }
