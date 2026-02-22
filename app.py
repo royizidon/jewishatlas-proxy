@@ -305,6 +305,55 @@ def api_dedicate():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/memory/<slug>", methods=["GET"])
+def api_memory(slug):
+    try:
+        token = get_arcgis_token()
+
+        # Get the feature
+        params = {
+            "where": f"slug = '{slug}'",
+            "outFields": "*",
+            "returnGeometry": "false",
+            "f": "json",
+            "token": token,
+        }
+
+        res = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=15)
+        data = res.json()
+
+        features = data.get("features", [])
+        if not features:
+            return jsonify({"error": "Not found"}), 404
+
+        feature = features[0]
+        object_id = feature["attributes"]["OBJECTID"]
+
+        # Now get attachments
+        att_res = requests.get(
+            f"{MEMORIAL_LAYER_URL}/{object_id}/attachments",
+            params={"f": "json", "token": token},
+            timeout=15
+        )
+
+        att_data = att_res.json()
+        attachments = att_data.get("attachmentInfos", [])
+
+        image_url = None
+        if attachments:
+            attachment_id = attachments[0]["id"]
+            image_url = (
+                f"{MEMORIAL_LAYER_URL}/{object_id}/attachments/"
+                f"{attachment_id}?token={token}"
+            )
+
+        return jsonify({
+            "attributes": feature["attributes"],
+            "image_url": image_url
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # =========================
 # Run
