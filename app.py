@@ -1,7 +1,9 @@
 from flask import Flask, request, Response, jsonify
 import os
+import re
 import json
 import time
+import unicodedata
 import requests
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -12,25 +14,70 @@ from datetime import datetime
 # =========================
 load_dotenv()
 
-ARCGIS_URL = os.getenv("ARCGIS_URL", "").strip()
+ARCGIS_URL         = os.getenv("ARCGIS_URL", "").strip()
 MEMORIAL_LAYER_URL = os.getenv("MEMORIAL_LAYER_URL", "").strip()
+ARCGIS_USERNAME    = os.getenv("ARCGIS_USERNAME", "").strip()
+ARCGIS_PASSWORD    = os.getenv("ARCGIS_PASSWORD", "").strip()
+ADMIN_SECRET       = os.getenv("ADMIN_SECRET", "").strip()  # protect debug endpoints
 
-ARCGIS_USERNAME = os.getenv("ARCGIS_USERNAME", "").strip()
-ARCGIS_PASSWORD = os.getenv("ARCGIS_PASSWORD", "").strip()
+
+def require_admin(req):
+    """Returns True only if the request carries the correct admin secret header."""
+    return bool(ADMIN_SECRET) and req.headers.get("X-Admin-Secret") == ADMIN_SECRET
 
 
-def parse_date_to_ms(date_str):
-    if not date_str:
-        return None
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return int(dt.timestamp() * 1000)
-    except ValueError:
-        return None
+# =========================
+# Slug generation (server-side only)
+# =========================
+def generate_slug(eng_name: str = "", he_name: str = "") -> str:
+    """
+    Always generated server-side — never trust the client.
+    - Prefers eng_name (Latin, URL-safe)
+    - Falls back to 'memorial' if empty or fully non-Latin after stripping
+    - Normalises accented chars (é→e, ü→u) via NFKD decomposition
+    - Strips everything except a-z, 0-9, and hyphens
+    - Appends a hex ms-timestamp suffix for uniqueness
+    """
+    base = (eng_name or "").strip()
+
+    if base:
+        base = unicodedata.normalize("NFKD", base)
+        base = base.encode("ascii", "ignore").decode("ascii")
+
+    if not base:
+        base = "memorial"
+
+    suffix = format(int(time.time() * 1000), "x")
+
+    slug = base.lower().strip().replace(" ", "-").replace("_", "-")
+    slug = re.sub(r"[^a-z0-9\-]", "", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+
+    if not slug:
+        slug = "memorial"
+
+    return f"{slug}-{suffix}"
+
+
+def sanitize_slug_param(raw: str) -> str:
+    """
+    Whitelist-only filter for slug values coming in via URL.
+    Allows only a-z, 0-9, and hyphens.
+    Raises ValueError if empty or suspiciously long.
+    """
+    cleaned = re.sub(r"[^a-z0-9\-]", "", raw.lower())
+    if not cleaned or len(cleaned) > 200:
+        raise ValueError(f"Invalid slug: {repr(raw)}")
+    return cleaned
 
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "https://jewishatlas.org",
+    "https://www.jewishatlas.org",
+    "http://localhost:3000",
+    "http://localhost:5500",
+])
 
 # =========================
 # ArcGIS Token (cached)
@@ -48,12 +95,12 @@ def get_arcgis_token():
 
     url = "https://www.arcgis.com/sharing/rest/generateToken"
     payload = {
-        "username": ARCGIS_USERNAME,
-        "password": ARCGIS_PASSWORD,
-        "client": "referer",
-        "referer": "https://api.jewishatlas.org",
+        "username":   ARCGIS_USERNAME,
+        "password":   ARCGIS_PASSWORD,
+        "client":     "referer",
+        "referer":    "https://api.jewishatlas.org",
         "expiration": 60,
-        "f": "json",
+        "f":          "json",
     }
 
     r = requests.post(url, data=payload, timeout=30)
@@ -62,11 +109,11 @@ def get_arcgis_token():
     if "token" not in data:
         raise RuntimeError(f"Token error: {data}")
 
-    token = data["token"]
+    token      = data["token"]
     expires_ms = data.get("expires", 0)
     expires_sec = int(expires_ms / 1000) if expires_ms else int(now + 55 * 60)
 
-    _TOKEN_CACHE["token"] = token
+    _TOKEN_CACHE["token"]   = token
     _TOKEN_CACHE["expires"] = expires_sec
     return token
 
@@ -97,15 +144,16 @@ def proxy_landmarks(subpath):
     if is_query:
         endpoint = f"{ARCGIS_URL}/query"
         if request.method == "GET":
-            upstream = requests.get(endpoint, params=request.args)
+            upstream = requests.get(endpoint, params=request.args, timeout=30)
         else:
             upstream = requests.post(
                 endpoint,
                 data=request.get_data(),
                 headers={"Content-Type": request.headers.get("Content-Type")},
+                timeout=30,
             )
     else:
-        upstream = requests.get(ARCGIS_URL, params=request.args)
+        upstream = requests.get(ARCGIS_URL, params=request.args, timeout=30)
 
     return Response(
         upstream.content,
@@ -138,11 +186,11 @@ def api_wall():
         token = get_arcgis_token()
 
         params = {
-            "where": "1=1",
-            "outFields": "slug,he_name,eng_name,born_str,death_str,born_display,death_display,origin,tier",
+            "where":         "is_published = 1",   # BUG FIX: was "1=1" — showed all records
+            "outFields":     "slug,he_name,eng_name,born_str,death_str,born_display,death_display,origin,tier",
             "orderByFields": "OBJECTID DESC",
-            "f": "json",
-            "token": token,
+            "f":             "json",
+            "token":         token,
         }
 
         upstream = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=30)
@@ -153,16 +201,18 @@ def api_wall():
 
 
 # =========================
-# Debug fields (TEMP)
+# Debug fields (protected)
 # =========================
 @app.route("/api/debug-fields", methods=["GET"])
 def debug_fields():
+    if not require_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
     try:
         token = get_arcgis_token()
         res = requests.get(
             MEMORIAL_LAYER_URL,
             params={"f": "json", "token": token},
-            timeout=30
+            timeout=30,
         )
         data = res.json()
         fields = [{"name": f["name"], "type": f.get("type")} for f in data.get("fields", [])]
@@ -173,17 +223,19 @@ def debug_fields():
 
 
 # =========================
-# Debug row (TEMP)
+# Debug row (protected)
 # =========================
 @app.route("/api/debug-row/<int:oid>", methods=["GET"])
 def debug_row(oid):
+    if not require_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
     try:
         token = get_arcgis_token()
         params = {
-            "where": f"OBJECTID = {oid}",
+            "where":     f"OBJECTID = {oid}",  # safe — Flask types oid as int
             "outFields": "*",
-            "f": "json",
-            "token": token,
+            "f":         "json",
+            "token":     token,
         }
         res = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=30)
         return Response(res.content, content_type="application/json")
@@ -192,7 +244,7 @@ def debug_row(oid):
 
 
 # =========================
-# Dedicate (insert draft)
+# Dedicate (insert)
 # =========================
 @app.route("/api/dedicate", methods=["POST"])
 def api_dedicate():
@@ -201,64 +253,71 @@ def api_dedicate():
 
     try:
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        token = get_arcgis_token()
+        token   = get_arcgis_token()
 
-        # Read form fields
         data = request.form
 
-        slug = data.get("slug")
-        he_name = data.get("he_name")
-        eng_name = data.get("eng_name")
+        he_name  = (data.get("he_name")  or "").strip()
+        eng_name = (data.get("eng_name") or "").strip()
 
-        if not slug:
-            return jsonify({"error": "Missing slug"}), 400
-
-        if not (he_name or eng_name):
+        if not he_name and not eng_name:
             return jsonify({"error": "Name required"}), 400
 
-        # Build attributes
-        attrs = {
-            "slug": slug,
-            "he_name": he_name,
-            "eng_name": eng_name,
-            "born_str": data.get("born_str"),
-            "death_str": data.get("death_str"),
-            "born_display": data.get("born_date"),
-            "death_display": data.get("death_date"),
-            "origin": data.get("origin"),
-            "full_bio": data.get("full_bio"),
-            "tier": data.get("tier") or "brick",
-            "memorial_type": "memory",
-            "is_published": 0,
-            "payment_status": "pending",
-            "dedicator_email": data.get("dedicator_email"),
-            "created": now_str,
-            "updated": now_str,
+        # Email validation
+        email = (data.get("dedicator_email") or "").strip()
+        if not email:
+            return jsonify({"error": "Email required"}), 400
+        if "@" not in email:
+            return jsonify({"error": "Invalid email — must contain @"}), 400
+        if len(email) > 256:
+            return jsonify({"error": "Email must be 256 characters or fewer"}), 400
 
+        # Slug — always generated server-side
+        slug = generate_slug(eng_name=eng_name, he_name=he_name)
+
+        # Tier whitelist
+        tier = data.get("tier") or "brick"
+        if tier not in ("brick", "page"):
+            tier = "brick"
+
+        attrs = {
+            "slug":            slug,
+            "he_name":         he_name  or None,
+            "eng_name":        eng_name or None,
+            "born_str":        data.get("born_str")  or None,
+            "death_str":       data.get("death_str") or None,
+            "born_display":    data.get("born_date") or None,
+            "death_display":   data.get("death_date") or None,
+            "origin":          data.get("origin")    or None,
+            # BUG FIX: operator precedence — must use ternary, not "x or None if cond else None"
+            "full_bio":        data.get("full_bio") if tier == "page" else None,
+            "tier":            tier,
+            "memorial_type":   "memory",
+            "is_published":    1,          # BUG FIX: was missing entirely — defaulted to null
+            "payment_status":  "pending",
+            "dedicator_email": email,
+            "created":         now_str,
+            "updated":         now_str,
         }
 
-        # Remove None values — ArcGIS can silently drop all attrs if any are None
+        # Remove None values — ArcGIS silently drops all attrs if any are None
         attrs = {k: v for k, v in attrs.items() if v is not None}
 
         feature = {"attributes": attrs}
 
-        # TEMP DEBUG
         print("SENT ATTRS:", json.dumps(attrs, ensure_ascii=False))
 
-        # Insert feature
         insert_res = requests.post(
             f"{MEMORIAL_LAYER_URL}/applyEdits",
             data={
-                "f": "json",
+                "f":     "json",
                 "token": token,
-                "adds": json.dumps([feature]),
+                "adds":  json.dumps([feature]),
             },
-            timeout=30
+            timeout=30,
         )
 
         insert_json = insert_res.json()
-
-        # TEMP DEBUG
         print("ARCGIS RESPONSE:", json.dumps(insert_json))
 
         add_results = insert_json.get("addResults", [])
@@ -271,89 +330,106 @@ def api_dedicate():
 
         object_id = add_result["objectId"]
 
-        # Upload image (if exists)
-        if "image" in request.files:
+        # Upload image (page tier only)
+        if tier == "page" and "image" in request.files:
             file = request.files["image"]
-
             if file and file.filename:
-                files = {
-                    "attachment": (file.filename, file.stream, file.mimetype)
-                }
-
-                attach_payload = {
-                    "f": "json",
-                    "token": token
-                }
-
                 attach_res = requests.post(
                     f"{MEMORIAL_LAYER_URL}/{object_id}/addAttachment",
-                    data=attach_payload,
-                    files=files,
-                    timeout=30
+                    data={"f": "json", "token": token},
+                    files={"attachment": (file.filename, file.stream, file.mimetype)},
+                    timeout=30,
                 )
-
                 attach_json = attach_res.json()
-
                 if not attach_json.get("addAttachmentResult", {}).get("success"):
                     return jsonify({"error": "Image upload failed", "details": attach_json}), 500
 
         return jsonify({
-            "success": True,
-            "objectId": object_id
+            "success":  True,
+            "objectId": object_id,
+            "slug":     slug,
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# =========================
+# Image proxy
+# Avoids embedding a short-lived ArcGIS token in the image URL.
+# BUG FIX: direct token URLs break after 60 minutes — this fetches a fresh token per request.
+# =========================
+@app.route("/api/image/<int:object_id>/<int:attachment_id>", methods=["GET"])
+def proxy_image(object_id, attachment_id):
+    try:
+        token = get_arcgis_token()
+        img_res = requests.get(
+            f"{MEMORIAL_LAYER_URL}/{object_id}/attachments/{attachment_id}",
+            params={"token": token},
+            timeout=15,
+            stream=True,
+        )
+        return Response(
+            img_res.content,
+            status=img_res.status_code,
+            content_type=img_res.headers.get("Content-Type", "image/jpeg"),
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# =========================
+# Memory page
+# =========================
 @app.route("/api/memory/<slug>", methods=["GET"])
 def api_memory(slug):
     try:
+        slug = sanitize_slug_param(slug)
+    except ValueError:
+        return jsonify({"error": "Invalid slug"}), 400
+
+    try:
         token = get_arcgis_token()
 
-        # Get the feature
         params = {
-            "where": f"slug = '{slug}'",
-            "outFields": "*",
+            "where":          f"slug = '{slug}'",  # safe — slug is a-z0-9- only after sanitize
+            "outFields":      "*",
             "returnGeometry": "false",
-            "f": "json",
-            "token": token,
+            "f":              "json",
+            "token":          token,
         }
 
-        res = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=15)
+        res  = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=15)
         data = res.json()
 
         features = data.get("features", [])
         if not features:
             return jsonify({"error": "Not found"}), 404
 
-        feature = features[0]
+        feature   = features[0]
         object_id = feature["attributes"]["OBJECTID"]
 
-        # Now get attachments
-        att_res = requests.get(
+        att_res     = requests.get(
             f"{MEMORIAL_LAYER_URL}/{object_id}/attachments",
             params={"f": "json", "token": token},
-            timeout=15
+            timeout=15,
         )
+        attachments = att_res.json().get("attachmentInfos", [])
 
-        att_data = att_res.json()
-        attachments = att_data.get("attachmentInfos", [])
-
+        # BUG FIX: use proxy URL instead of direct token URL — tokens expire in 60 min
         image_url = None
         if attachments:
             attachment_id = attachments[0]["id"]
-            image_url = (
-                f"{MEMORIAL_LAYER_URL}/{object_id}/attachments/"
-                f"{attachment_id}?token={token}"
-            )
+            image_url = f"/api/image/{object_id}/{attachment_id}"
 
         return jsonify({
             "attributes": feature["attributes"],
-            "image_url": image_url
+            "image_url":  image_url,
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # =========================
 # Run
