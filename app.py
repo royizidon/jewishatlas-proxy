@@ -420,7 +420,7 @@ def api_memory(slug):
         image_url = None
         if attachments:
             attachment_id = attachments[0]["id"]
-            image_url = f"/api/image/{object_id}/{attachment_id}"
+            image_url = f"https://api.jewishatlas.org/api/image/{object_id}/{attachment_id}"
 
         return jsonify({
             "attributes": feature["attributes"],
