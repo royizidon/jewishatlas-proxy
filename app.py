@@ -293,7 +293,7 @@ def api_dedicate():
             "full_bio":        data.get("full_bio") if tier == "page" else None,
             "tier":            tier,
             "memorial_type":   "memory",
-            "is_published":    1,          # BUG FIX: was missing entirely — defaulted to null
+            "is_published":    0,          # BUG FIX: was missing entirely — defaulted to null
             "payment_status":  "pending",
             "dedicator_email": email,
             "created":         now_str,
