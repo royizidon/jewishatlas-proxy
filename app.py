@@ -84,6 +84,8 @@ CORS(app, origins=[
 # =========================
 _TOKEN_CACHE = {"token": None, "expires": 0}
 
+_WALL_CACHE = {"data": None, "expires": 0}
+WALL_CACHE_TTL = 200000
 
 def get_arcgis_token():
     if not ARCGIS_USERNAME or not ARCGIS_PASSWORD:
@@ -173,31 +175,42 @@ def api_test_token():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
 # =========================
 # Wall list (published only)
 # =========================
+
 @app.route("/api/wall", methods=["GET"])
 def api_wall():
     if not MEMORIAL_LAYER_URL:
         return jsonify({"error": "MEMORIAL_LAYER_URL not set"}), 500
 
+    now = time.time()
+    if _WALL_CACHE["data"] and now < _WALL_CACHE["expires"]:
+        return Response(_WALL_CACHE["data"], status=200, content_type="application/json")
+
     try:
         token = get_arcgis_token()
-
         params = {
-            "where":         "is_published = 1",   # BUG FIX: was "1=1" — showed all records
+            "where":         "is_published = 1",
             "outFields":     "slug,he_name,eng_name,born_str,death_str,born_display,death_display,origin,tier",
             "orderByFields": "OBJECTID DESC",
             "f":             "json",
             "token":         token,
         }
-
         upstream = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=30)
+        _WALL_CACHE["data"]    = upstream.content
+        _WALL_CACHE["expires"] = now + WALL_CACHE_TTL
         return Response(upstream.content, status=upstream.status_code, content_type="application/json")
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/wall/refresh", methods=["POST"])
+def refresh_wall_cache():
+    _WALL_CACHE["data"]    = None
+    _WALL_CACHE["expires"] = 0
+    return jsonify({"ok": True})
 
 
 # =========================
