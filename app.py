@@ -72,6 +72,12 @@ def sanitize_slug_param(raw: str) -> str:
     return cleaned
 
 
+
+def normalize_eng_name(name: str) -> str:
+    """Normalize English name to ALL CAPS for consistent wall display."""
+    return name.strip().upper() if name else name
+
+
 app = Flask(__name__)
 CORS(app, origins=[
     "https://jewishatlas.org",
@@ -274,7 +280,7 @@ def api_dedicate():
         data = request.form
 
         he_name  = (data.get("he_name")  or "").strip()
-        eng_name = (data.get("eng_name") or "").strip()
+        eng_name = normalize_eng_name((data.get("eng_name") or "").strip())
 
         if not he_name and not eng_name:
             return jsonify({"error": "Name required"}), 400
@@ -428,8 +434,10 @@ def api_dedicate():
                     print("MAP INSERT FULL RESPONSE:", json.dumps(map_json, ensure_ascii=False))
 
             except Exception as map_err:
+                import traceback
                 map_insert_status = "error"
                 print("MAP INSERT EXCEPTION:", str(map_err))
+                print("MAP INSERT TRACEBACK:", traceback.format_exc())
 
         return jsonify({
             "success":    True,
