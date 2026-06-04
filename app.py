@@ -16,6 +16,7 @@ load_dotenv()
 
 ARCGIS_URL         = os.getenv("ARCGIS_URL", "").strip()
 MEMORIAL_LAYER_URL = os.getenv("MEMORIAL_LAYER_URL", "").strip()
+MEMORY_MAP_LAYER_URL = os.getenv("MEMORY_MAP_LAYER_URL", "").strip()
 ARCGIS_USERNAME    = os.getenv("ARCGIS_USERNAME", "").strip()
 ARCGIS_PASSWORD    = os.getenv("ARCGIS_PASSWORD", "").strip()
 ADMIN_SECRET       = os.getenv("ADMIN_SECRET", "").strip()  # protect debug endpoints
@@ -85,7 +86,7 @@ CORS(app, origins=[
 _TOKEN_CACHE = {"token": None, "expires": 0}
 
 _WALL_CACHE = {"data": None, "expires": 0}
-WALL_CACHE_TTL = 200000
+WALL_CACHE_TTL = 7 * 24 * 3600  # 1 week — cache is busted manually via /api/wall/refresh after publishing
 
 def get_arcgis_token():
     if not ARCGIS_USERNAME or not ARCGIS_PASSWORD:
@@ -208,6 +209,8 @@ def api_wall():
 
 @app.route("/api/wall/refresh", methods=["POST"])
 def refresh_wall_cache():
+    if not require_admin(request):
+         return jsonify({"error": "Unauthorized"}), 401
     _WALL_CACHE["data"]    = None
     _WALL_CACHE["expires"] = 0
     return jsonify({"ok": True})
@@ -355,12 +358,84 @@ def api_dedicate():
                 )
                 attach_json = attach_res.json()
                 if not attach_json.get("addAttachmentResult", {}).get("success"):
-                    return jsonify({"error": "Image upload failed", "details": attach_json}), 500
+                    # Log but do not abort — wall record already inserted, orphaning it would cause duplicates on retry
+                    print("IMAGE UPLOAD FAILED (non-fatal):", json.dumps(attach_json))
+
+        # =========================
+        # Map layer insert (second table)
+        # =========================
+        map_insert_status = "skipped"
+
+        has_map_place = data.get("has_map_place") == "1"
+        lat_raw  = data.get("latitude")
+        lng_raw  = data.get("longitude")
+
+        if has_map_place and lat_raw and lng_raw and MEMORY_MAP_LAYER_URL:
+            try:
+                latitude  = float(lat_raw)
+                longitude = float(lng_raw)
+
+                if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+                    raise ValueError(f"Coordinates out of range: {latitude}, {longitude}")
+
+                raw_precision  = (data.get("location_precision") or "").strip()
+                raw_connection = (data.get("connection_type")    or "").strip()
+
+                VALID_PRECISION       = {"Exact", "Approximate", "City level"}
+                VALID_CONNECTION_TYPES = {
+                    "Birthplace", "Hometown", "Family origin",
+                    "Home", "Resting place", "Meaningful place", "Other"
+                }
+
+                map_attrs = {
+                    "slug":               slug,
+                    "why_this_place":     (data.get("why_this_place")  or "").strip() or None,
+                    "connection_type":    raw_connection if raw_connection in VALID_CONNECTION_TYPES else None,
+                    "location_label":     (data.get("location_label")  or "").strip() or None,
+                    "location_precision": raw_precision if raw_precision in VALID_PRECISION else None,
+                    "show_on_map":        0,
+                }
+                map_attrs = {k: v for k, v in map_attrs.items() if v is not None}
+
+                map_feature = {
+                    "attributes": map_attrs,
+                    "geometry": {
+                        "x": longitude,
+                        "y": latitude,
+                        "spatialReference": {"wkid": 4326},
+                    },
+                }
+
+                print("MAP INSERT ATTRS:", json.dumps(map_attrs, ensure_ascii=False))
+
+                map_res  = requests.post(
+                    f"{MEMORY_MAP_LAYER_URL}/applyEdits",
+                    data={
+                        "f":     "json",
+                        "token": token,
+                        "adds":  json.dumps([map_feature], ensure_ascii=False),
+                    },
+                    timeout=30,
+                )
+                map_json = map_res.json()
+                map_add  = map_json.get("addResults", [{}])[0]
+
+                if map_add.get("success"):
+                    map_insert_status = "success"
+                else:
+                    map_insert_status = "error"
+                    print("MAP INSERT FAILED:", json.dumps(map_add, ensure_ascii=False))
+                    print("MAP INSERT FULL RESPONSE:", json.dumps(map_json, ensure_ascii=False))
+
+            except Exception as map_err:
+                map_insert_status = "error"
+                print("MAP INSERT EXCEPTION:", str(map_err))
 
         return jsonify({
-            "success":  True,
-            "objectId": object_id,
-            "slug":     slug,
+            "success":    True,
+            "objectId":   object_id,
+            "slug":       slug,
+            "map_insert": map_insert_status,
         })
 
     except Exception as e:
@@ -449,4 +524,4 @@ def api_memory(slug):
 # =========================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_DEBUG", "0") == "1")
