@@ -9,6 +9,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from datetime import datetime
 
+
 # =========================
 # Load env
 # =========================
@@ -94,6 +95,11 @@ _TOKEN_CACHE = {"token": None, "expires": 0}
 _WALL_CACHE = {"data": None, "expires": 0}
 WALL_CACHE_TTL = 7 * 24 * 3600  # 1 week — cache is busted manually via /api/wall/refresh after publishing
 
+_MEMORY_CACHE = {}
+MEMORY_CACHE_TTL = 7 * 24 * 3600  # 1 week
+
+
+
 def get_arcgis_token():
     if not ARCGIS_USERNAME or not ARCGIS_PASSWORD:
         raise RuntimeError("Missing ARCGIS_USERNAME or ARCGIS_PASSWORD in .env")
@@ -108,7 +114,7 @@ def get_arcgis_token():
         "password":   ARCGIS_PASSWORD,
         "client":     "referer",
         "referer":    "https://api.jewishatlas.org",
-        "expiration": 60,
+        "expiration": 480,
         "f":          "json",
     }
 
@@ -120,7 +126,7 @@ def get_arcgis_token():
 
     token      = data["token"]
     expires_ms = data.get("expires", 0)
-    expires_sec = int(expires_ms / 1000) if expires_ms else int(now + 55 * 60)
+    expires_sec = int(expires_ms / 1000) if expires_ms else int(now + 470 * 60)
 
     _TOKEN_CACHE["token"]   = token
     _TOKEN_CACHE["expires"] = expires_sec
@@ -484,17 +490,19 @@ def api_memory(slug):
     except ValueError:
         return jsonify({"error": "Invalid slug"}), 400
 
+    now = time.time()
+    if slug in _MEMORY_CACHE and now < _MEMORY_CACHE[slug]["expires"]:
+        return jsonify(_MEMORY_CACHE[slug]["data"])
+
     try:
         token = get_arcgis_token()
-
         params = {
-            "where":          f"slug = '{slug}'",  # safe — slug is a-z0-9- only after sanitize
+            "where":          f"slug = '{slug}'",
             "outFields":      "*",
             "returnGeometry": "false",
             "f":              "json",
             "token":          token,
         }
-
         res  = requests.get(f"{MEMORIAL_LAYER_URL}/query", params=params, timeout=15)
         data = res.json()
 
@@ -505,23 +513,21 @@ def api_memory(slug):
         feature   = features[0]
         object_id = feature["attributes"]["OBJECTID"]
 
-        att_res     = requests.get(
+        att_res = requests.get(
             f"{MEMORIAL_LAYER_URL}/{object_id}/attachments",
             params={"f": "json", "token": token},
             timeout=15,
         )
         attachments = att_res.json().get("attachmentInfos", [])
 
-        # BUG FIX: use proxy URL instead of direct token URL — tokens expire in 60 min
         image_url = None
         if attachments:
             attachment_id = attachments[0]["id"]
             image_url = f"https://api.jewishatlas.org/api/image/{object_id}/{attachment_id}"
 
-        return jsonify({
-            "attributes": feature["attributes"],
-            "image_url":  image_url,
-        })
+        result = {"attributes": feature["attributes"], "image_url": image_url}
+        _MEMORY_CACHE[slug] = {"data": result, "expires": now + MEMORY_CACHE_TTL}
+        return jsonify(result)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
