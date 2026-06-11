@@ -532,7 +532,45 @@ def api_memory(slug):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# =========================
+# Landmark detail (popup)
+# =========================
+_LANDMARK_CACHE = {}
+LANDMARK_CACHE_TTL = 7 * 24 * 3600  # 1 week
 
+
+@app.route("/api/landmarks/points/<landmark_id>", methods=["GET"])
+def api_landmark_detail(landmark_id):
+    # Sanitize id
+    if not re.match(r'^[a-zA-Z0-9_-]+$', landmark_id) or len(landmark_id) > 100:
+        return jsonify({"error": "Invalid id"}), 400
+
+    now = time.time()
+    if landmark_id in _LANDMARK_CACHE and now < _LANDMARK_CACHE[landmark_id]["expires"]:
+        return jsonify(_LANDMARK_CACHE[landmark_id]["data"])
+
+    try:
+        token = get_arcgis_token()
+        params = {
+            "where":          f"id = {landmark_id}",
+            "outFields":      "id,name,main_category,address,city,description,fees_opening_hours,photo,website",
+            "returnGeometry": "false",
+            "f":              "json",
+            "token":          token,
+        }
+        res  = requests.get(f"{ARCGIS_URL}/query", params=params, timeout=15)
+        data = res.json()
+
+        features = data.get("features", [])
+        if not features:
+            return jsonify({"error": "Not found"}), 404
+
+        result = features[0]["attributes"]
+        _LANDMARK_CACHE[landmark_id] = {"data": result, "expires": now + LANDMARK_CACHE_TTL}
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 # =========================
 # Run
 # =========================
