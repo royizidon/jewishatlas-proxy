@@ -553,7 +553,7 @@ def api_landmark_detail(landmark_id):
         token = get_arcgis_token()
         params = {
             "where":          f"id = {landmark_id}",
-            "outFields":      "id,name,main_category,address,city,description,fees_opening_hours,photo,website",
+            "outFields": "id,name,eng_name,main_category,address,city,description,fees_opening_hours,photo,website",
             "returnGeometry": "false",
             "f":              "json",
             "token":          token,
